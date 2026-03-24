@@ -54,6 +54,7 @@ def get_data():
         (SELECT IsViolated FROM CaseMilestones)
     FROM Case 
     WHERE Type = 'OA'
+    AND CreatedDate = LAST_N_DAYS:90
     """
     result = sf.query_all(query)
     
