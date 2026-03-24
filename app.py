@@ -135,7 +135,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         
     df_final = pd.DataFrame(linhas)
     
-    # TRAVA DE SEGURANÇA: Força as colunas a serem sempre do tipo Data
     if not df_final.empty:
         df_final['Abertura'] = pd.to_datetime(df_final['Abertura'])
         df_final['Fechamento'] = pd.to_datetime(df_final['Fechamento'])
@@ -257,7 +256,7 @@ else:
         if cart_sel != "Todas":
             df_view = df_view[df_view['Subfila'] == cart_sel]
             
-    # --- KPIS SUPERIORES ---
+    # --- 1. KPIS SUPERIORES ---
     vol = len(df_view)
     trat = len(df_view[df_view['Macro Status'] == 'Em Tratativa'])
     fech = len(df_view[df_view['Macro Status'] == 'Fechado'])
@@ -291,66 +290,19 @@ else:
     """
     st.markdown(html_kpi_detalhe, unsafe_allow_html=True)
 
-    # --- GRÁFICO TENDÊNCIA ABERTOS VS FECHADOS ---
-    st.markdown("#### Tendência Operacional")
-    
-    # Prepara dados de Abertura
-    df_trend_abertos = df_view[df_view['Abertura'].notna()].copy()
-    s_abertos = df_trend_abertos['Abertura'].dt.date.value_counts().rename('Abertos')
-
-    # Prepara dados de Fechamento (protegido contra Nulo)
-    df_trend_fechados = df_view[df_view['Fechamento'].notna()].copy()
-    s_fechados = df_trend_fechados['Fechamento'].dt.date.value_counts().rename('Fechados')
-
-    # Junta e Plota
-    df_trend = pd.concat([s_abertos, s_fechados], axis=1).fillna(0).reset_index()
-    df_trend.rename(columns={'index': 'Data'}, inplace=True)
-    df_trend = df_trend.sort_values('Data')
-
-    if not df_trend.empty:
-        fig_trend = px.line(df_trend, x='Data', y=['Abertos', 'Fechados'], 
-                            labels={'value': 'Volume', 'Data': 'Data', 'variable': 'Status'},
-                            color_discrete_map={'Abertos': '#EF553B', 'Fechados': '#00CC96'})
-        fig_trend.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), plot_bgcolor='rgba(0,0,0,0)', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-        st.plotly_chart(fig_trend, use_container_width=True)
-
-    # --- GRÁFICOS INFERIORES ---
-    c1, c2 = st.columns(2, gap="large")
-    with c1:
-        df_abertos = df_view[df_view['Macro Status'] == 'Em Tratativa'].copy()
-        if not df_abertos.empty:
-            df_abertos['Idade'] = (datetime.now(timezone.utc).replace(tzinfo=None) - df_abertos['Abertura']).dt.days
-            bins = [-1, 3, 7, 10000]
-            labels = ['0 a 3 Dias', '4 a 7 Dias', '+7 Dias']
-            df_abertos['Faixa'] = pd.cut(df_abertos['Idade'], bins=bins, labels=labels)
-            df_age = df_abertos['Faixa'].value_counts().reindex(labels).reset_index()
-            
-            fig_age = px.bar(df_age, x='Faixa', y='count', title='Idade dos Casos Abertos', text='count', color='Faixa',
-                             color_discrete_map={'0 a 3 Dias':'#0056b3', '4 a 7 Dias':'#f0ad4e', '+7 Dias':'#d9534f'})
-            fig_age.update_traces(textposition='outside', showlegend=False)
-            fig_age.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_age, use_container_width=True)
-        else:
-            st.info("Nenhum caso em aberto no momento.")
-            
-    with c2:
-        df_sla = df_view['SLA Atrasado'].value_counts().reset_index()
-        fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Saúde do SLA (Total)', 
-                         color='SLA Atrasado', color_discrete_map={'No Prazo':'#00CC96', 'Atrasado':'#EF553B'})
-        fig_sla.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_sla, use_container_width=True)
-
-    st.markdown("---")
-    
+    # --- 2. EXTRATO (TABELA E EXCEL) ---
+    st.markdown("#### Extrato de Casos")
     col_dl, col_aviso = st.columns([1, 3])
     with col_dl:
         def to_excel(df_export):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_export['Abertura'] = df_export['Abertura'].dt.tz_localize(None)
-                if df_export['Fechamento'].notna().any():
-                    df_export['Fechamento'] = df_export['Fechamento'].dt.tz_localize(None)
-                df_export.to_excel(writer, index=False, sheet_name='Extrato')
+                # Remove fuso horário antes de salvar no Excel
+                df_temp = df_export.copy()
+                df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
+                if df_temp['Fechamento'].notna().any():
+                    df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
+                df_temp.to_excel(writer, index=False, sheet_name='Extrato')
             return output.getvalue()
 
         st.download_button(
@@ -362,7 +314,7 @@ else:
     with col_aviso:
         st.caption("💡 **Dica:** Passe o rato sobre o cabeçalho de qualquer coluna abaixo e clique no ícone da lupa para aplicar filtros.")
     
-    # --- FORMATAÇÃO CONDICIONAL DA TABELA ---
+    # Formatação condicional (Cor Vermelha nos Atrasos)
     def colorir_linha(row):
         cor = '#ffebee' if row['SLA Atrasado'] == 'Atrasado' else '#ffffff'
         return [f'background-color: {cor}' for _ in row]
@@ -379,3 +331,52 @@ else:
         },
         use_container_width=True
     )
+    
+    st.markdown("---")
+
+    # --- 3. GRÁFICOS (TENDÊNCIA, IDADE E SLA) ---
+    st.markdown("#### Tendência Operacional")
+    
+    df_trend_abertos = df_view[df_view['Abertura'].notna()].copy()
+    s_abertos = df_trend_abertos['Abertura'].dt.date.value_counts().rename('Abertos')
+
+    df_trend_fechados = df_view[df_view['Fechamento'].notna()].copy()
+    s_fechados = df_trend_fechados['Fechamento'].dt.date.value_counts().rename('Fechados')
+
+    df_trend = pd.concat([s_abertos, s_fechados], axis=1).fillna(0).reset_index()
+    df_trend.rename(columns={'index': 'Data'}, inplace=True)
+    df_trend = df_trend.sort_values('Data')
+
+    if not df_trend.empty:
+        fig_trend = px.line(df_trend, x='Data', y=['Abertos', 'Fechados'], 
+                            labels={'value': 'Volume', 'Data': 'Data', 'variable': 'Status'},
+                            color_discrete_map={'Abertos': '#EF553B', 'Fechados': '#00CC96'})
+        fig_trend.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), plot_bgcolor='rgba(0,0,0,0)', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+    # Gráficos Inferiores
+    st.markdown("#### Análise de Backlog em Aberto")
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        df_abertos = df_view[df_view['Macro Status'] == 'Em Tratativa'].copy()
+        if not df_abertos.empty:
+            df_abertos['Idade'] = (datetime.now(timezone.utc).replace(tzinfo=None) - df_abertos['Abertura']).dt.days
+            bins = [-1, 3, 7, 10000]
+            labels = ['0 a 3 Dias', '4 a 7 Dias', '+7 Dias']
+            df_abertos['Faixa'] = pd.cut(df_abertos['Idade'], bins=bins, labels=labels)
+            df_age = df_abertos['Faixa'].value_counts().reindex(labels).reset_index()
+            
+            fig_age = px.bar(df_age, x='Faixa', y='count', title='Idade dos Casos Abertos', text='count', color='Faixa',
+                             color_discrete_map={'0 a 3 Dias':'#0056b3', '4 a 7 Dias':'#f0ad4e', '+7 Dias':'#d9534f'})
+            fig_age.update_traces(textposition='outside', showlegend=False)
+            fig_age.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_age, use_container_width=True)
+        else:
+            st.info("Nenhum caso em aberto no momento para a faixa de tempo selecionada.")
+            
+    with c2:
+        df_sla = df_view['SLA Atrasado'].value_counts().reset_index()
+        fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Saúde do SLA (Total)', 
+                         color='SLA Atrasado', color_discrete_map={'No Prazo':'#00CC96', 'Atrasado':'#EF553B'})
+        fig_sla.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_sla, use_container_width=True)
