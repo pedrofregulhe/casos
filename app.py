@@ -11,16 +11,14 @@ st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar
 # --- CSS CUSTOMIZADO (BRANCO, SEM CABEÇALHO, PASTINHAS) ---
 st.markdown("""
     <style>
-    /* 1. Remove Fundo Cinza e Cabeçalhos Nativos do Streamlit */
     .stApp { background-color: #ffffff !important; }
     header { visibility: hidden !important; height: 0px !important; display: none !important; }
     #MainMenu { visibility: hidden !important; display: none !important; }
     footer { visibility: hidden !important; display: none !important; }
-    .block-container { padding-top: 2rem !important; } /* Sobe o conteúdo */
+    .block-container { padding-top: 2rem !important; }
     
     h1, h2, h3 { color: #1a2935; font-family: 'Segoe UI', Tahoma, sans-serif; }
     
-    /* 2. Estilo das Pastinhas (Expanders) */
     div[data-testid="stExpander"] {
         border: 1px solid #dce1e6 !important;
         border-radius: 8px !important;
@@ -29,7 +27,7 @@ st.markdown("""
         background-color: #ffffff !important;
     }
     div[data-testid="stExpander"] summary {
-        background-color: #f8fbff !important; /* Azul bem clarinho para a aba da pasta */
+        background-color: #f8fbff !important;
         border-radius: 8px !important;
         padding: 10px 15px !important;
     }
@@ -74,7 +72,7 @@ def get_data(periodo_selecionado, incluir_fechados):
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # QUERY ATUALIZADA: Pega tudo que é OA *OU* tudo que está na CARTEIRA (ignorando OS)
+    # QUERY CORRIGIDA: Inclui Type nulo ou diferente de OS para Carteiras
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, Status,
@@ -82,7 +80,7 @@ def get_data(periodo_selecionado, incluir_fechados):
         Origin, Type, FOZ_Motivo__c, FOZ_Detalhe__c, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones)
     FROM Case 
-    WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND Type != 'OS'))
+    WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)))
       AND CreatedDate = {filtro_data}
       {filtro_status}
     """
@@ -93,7 +91,6 @@ def get_data(periodo_selecionado, incluir_fechados):
     for record in result['records']:
         dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
         
-        # LISTA DE FILAS ATUALIZADA (COM BACKOFFICE)
         filas_conhecidas = [
             "ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
             "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
@@ -119,6 +116,8 @@ def get_data(periodo_selecionado, incluir_fechados):
             'Abertura': pd.to_datetime(record['CreatedDate']).tz_localize(None),
             'Fila Principal': fila_principal,
             'Subfila': subfila,
+            'Origem': record['Origin'],  # NOVO CAMPO
+            'Tipo': record['Type'] if record['Type'] else 'Sem Tipo', # NOVO CAMPO (Exibe se for e-mail vazio)
             'Status': record['Status'],
             'Macro Status': macro_status,
             'SLA Atrasado': 'Sim' if sla_atrasado else 'Não',
@@ -130,7 +129,7 @@ def get_data(periodo_selecionado, incluir_fechados):
 
 # --- GERADOR VISUAL DE CARDS ---
 def render_kpi_row(metricas):
-    html = '<div style="display: flex; justify-content: space-between; gap: 15px; margin-bottom: 25px; margin-top: 10px; width: 100%;">'
+    html = '<div style="display: flex; justify-content: space-between; gap: 15px; margin-bottom: 20px; margin-top: 5px; width: 100%;">'
     for metrica in metricas:
         label = metrica['label']
         valor = metrica['valor']
@@ -164,14 +163,12 @@ incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 df_filtrado = get_data(periodo_selecionado, incluir_fechados)
 
 # --- TELA PRINCIPAL ---
-st.markdown("<h1 style='font-size: 28px; margin-bottom: 20px;'>Visão de Casos (OA e Carteiras)</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='font-size: 28px; margin-bottom: 20px;'>Visão de Casos (OA e Corporativo)</h1>", unsafe_allow_html=True)
 
 if df_filtrado.empty:
     st.info("Nenhum caso encontrado para os filtros selecionados.")
 else:
-    # ORDENAÇÃO DAS FILAS (Garante que "ATRIBUÍDO AO USUÁRIO" seja sempre a última)
     todas_filas = df_filtrado['Fila Principal'].unique().tolist()
-    
     if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
         todas_filas.remove("ATRIBUÍDO AO USUÁRIO")
         filas_ordenadas = sorted(todas_filas)
@@ -181,41 +178,61 @@ else:
     
     # --- CRIAÇÃO DAS PASTINHAS (EXPANDERS) ---
     for fila in filas_ordenadas:
-        df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
+        df_fila_orig = df_filtrado[df_filtrado['Fila Principal'] == fila]
+        vol_pasta = len(df_fila_orig)
         
-        vol_total = len(df_fila)
-        em_tratativa = len(df_fila[df_fila['Macro Status'] == 'Em Tratativa'])
-        fechados = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
-        atrasados = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
-        
-        # Cria a pastinha com o nome da fila e o volume total para bater o olho rápido
-        with st.expander(f"📁 {fila} ({vol_total} Casos)", expanded=False):
+        with st.expander(f"📁 {fila} ({vol_pasta} Casos)", expanded=False):
             
-            # 1. Desenha os Cards dentro da pasta
+            # --- LÓGICA DE FILTRO INTERNO PARA CARTEIRAS ---
+            df_view = df_fila_orig.copy()
+            
+            if fila == "CORPORATIVO":
+                carteiras_disponiveis = sorted(df_view['Subfila'].unique().tolist())
+                # Cria um selectbox discreto dentro da pasta
+                col_filtro, _ = st.columns([1, 2])
+                with col_filtro:
+                    carteira_selecionada = st.selectbox(
+                        "📌 Filtrar Carteira Específica:", 
+                        ["Todas"] + carteiras_disponiveis, 
+                        key=f"sel_{fila}"
+                    )
+                if carteira_selecionada != "Todas":
+                    df_view = df_view[df_view['Subfila'] == carteira_selecionada]
+
+            # 1. Recalcula as métricas baseadas no filtro (se houver)
+            vol_total = len(df_view)
+            em_tratativa = len(df_view[df_view['Macro Status'] == 'Em Tratativa'])
+            fechados = len(df_view[df_view['Macro Status'] == 'Fechado'])
+            atrasados = len(df_view[(df_view['SLA Atrasado'] == 'Sim') & (df_view['Macro Status'] == 'Em Tratativa')])
+            
+            # 2. Desenha os Cards
             metricas = [
-                {'label': 'Volume Total', 'valor': vol_total},
+                {'label': 'Volume', 'valor': vol_total},
                 {'label': 'Em Tratativa', 'valor': em_tratativa},
                 {'label': 'Fechados', 'valor': fechados},
                 {'label': 'SLA Atrasado (Ativos)', 'valor': atrasados, 'alert': atrasados > 0}
             ]
             st.markdown(render_kpi_row(metricas), unsafe_allow_html=True)
             
-            # 2. Desenha os Gráficos dentro da pasta
+            # 3. Desenha os Gráficos
             col_chart1, col_chart2 = st.columns(2)
             with col_chart1:
                 label_grf1 = 'Casos por Usuário' if fila != 'CORPORATIVO' else 'Casos por Carteira'
-                df_grp = df_fila['Subfila'].value_counts().reset_index()
+                df_grp = df_view['Subfila'].value_counts().reset_index()
                 fig_grp = px.bar(df_grp, x='count', y='Subfila', orientation='h', title=label_grf1, labels={'count': 'Volume', 'Subfila': ''})
                 fig_grp.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0), yaxis={'categoryorder':'total ascending'}, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_grp, use_container_width=True)
                 
             with col_chart2:
-                df_sla = df_fila['SLA Atrasado'].value_counts().reset_index()
-                fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.6, title='Saúde do SLA (Total)', color='SLA Atrasado', color_discrete_map={'Não':'#0056b3', 'Sim':'#d9534f'})
+                df_sla = df_view['SLA Atrasado'].value_counts().reset_index()
+                # Se não houver dados no filtro, exibe gráfico vazio elegantemente
+                if df_sla.empty:
+                    df_sla = pd.DataFrame({'SLA Atrasado': ['Sem Dados'], 'count': [1]})
+                fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.6, title='Saúde do SLA (Total)', color='SLA Atrasado', color_discrete_map={'Não':'#0056b3', 'Sim':'#d9534f', 'Sem Dados':'#e0e0e0'})
                 fig_sla.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_sla, use_container_width=True)
 
-            # 3. Desenha a Tabela e Botão Excel dentro da pasta
+            # 4. Tabela e Excel
             st.markdown("---")
             def to_excel(df_export):
                 output = BytesIO()
@@ -224,15 +241,16 @@ else:
                 return output.getvalue()
 
             st.download_button(
-                label=f"📥 Baixar Extrato: {fila}",
-                data=to_excel(df_fila),
+                label=f"📥 Baixar Extrato",
+                data=to_excel(df_view),
                 file_name=f'extrato_{fila.replace(" ", "_").lower()}.xlsx',
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                key=f"dl_{fila}" # Chave única necessária quando há vários botões de download
+                key=f"dl_{fila}"
             )
             
+            # Tabela agora exibe as colunas Origem e Tipo para rastrear os casos corporativos
             st.dataframe(
-                df_fila,
+                df_view,
                 column_config={
                     "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
                     "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
