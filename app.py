@@ -19,7 +19,6 @@ st.markdown("""
     
     h1 { font-size: 24px !important; margin-bottom: 20px !important; color: #1a2935; }
     
-    /* Botões dos Cards (Visão Geral) */
     .stButton>button {
         border-radius: 0px 0px 8px 8px !important;
         border-top: none !important;
@@ -32,24 +31,6 @@ st.markdown("""
     .stButton>button:hover {
         background-color: #0056b3 !important;
         color: white !important;
-    }
-    
-    /* CORREÇÃO: Botão de Sincronizar (Barra Lateral) Centralizado */
-    [data-testid="stSidebar"] div.stButton {
-        display: flex;
-        justify-content: center;
-        width: 100%;
-    }
-    [data-testid="stSidebar"] div.stButton > button {
-        width: 95% !important; /* Ocupa quase toda a barra, mantendo margem */
-        border-radius: 6px !important;
-        background-color: #0056b3 !important;
-        color: white !important;
-        margin-top: 10px !important;
-        border: none !important;
-    }
-    [data-testid="stSidebar"] div.stButton > button:hover {
-        background-color: #004494 !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -130,7 +111,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             
         macro_status = "Fechado" if record['Status'] in ['Closed', 'Fechado'] else "Em Tratativa"
         sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
-        
         data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
         
         linhas.append({
@@ -188,7 +168,14 @@ except Exception:
 
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
-# Botão de Sincronizar com formatação corrigida pelo CSS
+st.markdown("""
+    <style>
+    [data-testid="stSidebar"] div.stButton { display: flex; justify-content: center; width: 100%; }
+    [data-testid="stSidebar"] div.stButton > button { width: 95% !important; border-radius: 6px !important; background-color: #0056b3 !important; color: white !important; margin-top: 10px !important; border: none !important; }
+    [data-testid="stSidebar"] div.stButton > button:hover { background-color: #004494 !important; }
+    </style>
+""", unsafe_allow_html=True)
+
 if st.sidebar.button("🔄 Sincronizar Agora", type="primary", use_container_width=True):
     st.cache_data.clear()
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
@@ -239,20 +226,10 @@ else:
     # VISÃO 2: TELA DE DETALHES
     fila_atual = st.session_state.fila_selecionada
     
-    # Botão de voltar com inline style para garantir a cor e o tamanho mesmo com o CSS global
     st.markdown("""
         <style>
-        .btn-voltar-container .stButton>button {
-            border-radius: 6px !important;
-            background-color: #0056b3 !important;
-            color: white !important;
-            margin-top: 0px !important;
-            width: 280px !important;
-            border: none !important;
-        }
-        .btn-voltar-container .stButton>button:hover {
-            background-color: #004494 !important;
-        }
+        .btn-voltar-container .stButton>button { border-radius: 6px !important; background-color: #0056b3 !important; color: white !important; margin-top: 0px !important; width: 280px !important; border: none !important; }
+        .btn-voltar-container .stButton>button:hover { background-color: #004494 !important; }
         </style>
         <div class="btn-voltar-container">
     """, unsafe_allow_html=True)
@@ -262,8 +239,8 @@ else:
         st.rerun()
         
     st.markdown('</div>', unsafe_allow_html=True)
-    
     st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Fila: {fila_atual}</h2>", unsafe_allow_html=True)
+    
     df_view = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
     
     if fila_atual == "CORPORATIVO":
@@ -274,9 +251,62 @@ else:
         if cart_sel != "Todas":
             df_view = df_view[df_view['Subfila'] == cart_sel]
             
-    # Gráficos Executivos
-    c1, c2 = st.columns(2, gap="large")
+    # --- NOVOS KPIS SUPERIORES (COM TMA) ---
+    vol = len(df_view)
+    trat = len(df_view[df_view['Macro Status'] == 'Em Tratativa'])
+    fech = len(df_view[df_view['Macro Status'] == 'Fechado'])
+    df_fechados = df_view[df_view['Macro Status'] == 'Fechado']
     
+    if not df_fechados.empty:
+        tma_dias = (df_fechados['Fechamento'] - df_fechados['Abertura']).dt.total_seconds().mean() / (24 * 3600)
+        tma_str = f"{tma_dias:.1f} dias"
+    else:
+        tma_str = "N/A"
+
+    html_kpi_detalhe = f"""
+    <div style="display: flex; gap: 15px; margin-bottom: 25px;">
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0056b3; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Total de Casos</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{vol}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #f0ad4e; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Em Tratativa</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{trat}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #00CC96; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Fechados</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{fech}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #6f42c1; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">TMA (Casos Fechados)</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{tma_str}</div>
+        </div>
+    </div>
+    """
+    st.markdown(html_kpi_detalhe, unsafe_allow_html=True)
+
+    # --- NOVO GRÁFICO TENDÊNCIA ABERTOS VS FECHADOS ---
+    st.markdown("#### Tendência Operacional")
+    df_trend_abertos = df_view[df_view['Abertura'].notna()].copy()
+    df_trend_abertos['Data'] = df_trend_abertos['Abertura'].dt.date
+    s_abertos = df_trend_abertos.groupby('Data').size().rename('Abertos')
+
+    df_trend_fechados = df_view[df_view['Fechamento'].notna()].copy()
+    df_trend_fechados['Data'] = df_trend_fechados['Fechamento'].dt.date
+    s_fechados = df_trend_fechados.groupby('Data').size().rename('Fechados')
+
+    df_trend = pd.concat([s_abertos, s_fechados], axis=1).fillna(0).reset_index()
+    df_trend = df_trend.sort_values('Data')
+
+    if not df_trend.empty:
+        fig_trend = px.line(df_trend, x='Data', y=['Abertos', 'Fechados'], 
+                            labels={'value': 'Volume', 'Data': 'Data', 'variable': 'Métrica'},
+                            color_discrete_map={'Abertos': '#EF553B', 'Fechados': '#00CC96'})
+        fig_trend.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), plot_bgcolor='rgba(0,0,0,0)', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+    # --- GRÁFICOS INFERIORES ---
+    c1, c2 = st.columns(2, gap="large")
     with c1:
         df_abertos = df_view[df_view['Macro Status'] == 'Em Tratativa'].copy()
         if not df_abertos.empty:
@@ -321,16 +351,23 @@ else:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     with col_aviso:
-        st.caption("💡 **Dica:** Passe o mouse sobre o cabeçalho de qualquer coluna abaixo e clique no ícone da lupa para aplicar filtros.")
+        st.caption("💡 **Dica:** Passe o rato sobre o cabeçalho de qualquer coluna abaixo e clique no ícone da lupa para aplicar filtros.")
     
+    # --- FORMATAÇÃO CONDICIONAL DA TABELA (Cor Vermelha nos Atrasos) ---
+    def colorir_linha(row):
+        cor = '#ffebee' if row['SLA Atrasado'] == 'Atrasado' else '#ffffff'
+        return [f'background-color: {cor}' for _ in row]
+
+    # Aplica o estilo. Ocultei o índice para a visualização ficar mais limpa
+    df_estilizado = df_view.style.apply(colorir_linha, axis=1).hide(axis="index")
+
     st.dataframe(
-        df_view,
+        df_estilizado,
         column_config={
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
             "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
             "ID do Caso": None
         },
-        use_container_width=True,
-        hide_index=True
+        use_container_width=True
     )
