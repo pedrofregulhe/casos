@@ -8,45 +8,111 @@ import plotly.express as px
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos OA", layout="wide", initial_sidebar_state="expanded")
 
-# --- CSS CUSTOMIZADO (Visual Executivo e Clean) ---
+# --- CSS CUSTOMIZADO (REPLICAÇÃO EXATA DA REFERÊNCIA) ---
+# Aqui construímos o design dos cards, sombras, bordas superiores azuis e tipografia.
 st.markdown("""
     <style>
-    div[data-testid="metric-container"] {
-        background-color: #f8f9fa;
-        border: 1px solid #e0e0e0;
-        padding: 18px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 6px rgba(0,0,0,0.04);
+    /* Estilo do Título Executivo */
+    h1 {
+        font-size: 26px !important;
+        font-family: 'IBM Plex Sans', sans-serif !important;
+        color: #1c2b39;
+        margin-bottom: -15px !important;
     }
-    div[data-testid="stMetricValue"] {
-        color: #0c1c2b;
-        font-weight: 700;
+    h2, h3 {
+        font-family: 'IBM Plex Sans', sans-serif !important;
+        color: #1c2b39;
     }
-    div[data-testid="stMetricLabel"] {
-        color: #6c757d;
+
+    /* Container para alinhar os cards horizontalmente */
+    .kpi-row-container {
+        display: flex;
+        flex-direction: row;
+        justify-content: space-around;
+        gap: 10px;
+        width: 100%;
+        margin-bottom: 20px;
+    }
+
+    /* O Card de KPI Principal - Baseado na imagem de referência */
+    .kpi-card {
+        background-color: #ffffff;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.06); /* Sombra sutil */
+        border-top: 6px solid #0056b3; /* Borda superior azul */
+        padding: 20px;
+        flex: 1; /* Todos os cards com o mesmo tamanho */
+        text-align: center;
+        min-width: 160px;
+    }
+    
+    /* Card Especial para Alerta de SLA Atrasado (Vermelho) */
+    .kpi-card-alert {
+        background-color: #ffffff;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.06);
+        border-top: 6px solid #d9534f; /* Borda superior vermelha */
+        padding: 20px;
+        flex: 1;
+        text-align: center;
+        min-width: 160px;
+    }
+
+    /* Rótulo superior do Card (Texto Cinza, Centrado, Uppercase) */
+    .kpi-label {
+        font-family: 'IBM Plex Sans', sans-serif;
+        color: #727b84;
+        font-size: 13px;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 0.8px;
+        margin-bottom: 8px;
     }
-    [data-testid="metric-container"]:nth-child(4) div[data-testid="stMetricValue"] {
+
+    /* Valor principal do Card (Texto Azul Grande, Bold) */
+    .kpi-value {
+        font-family: 'IBM Plex Sans', sans-serif;
+        color: #0056b3;
+        font-size: 34px;
+        font-weight: 700;
+        margin-bottom: 0px;
+    }
+    
+    /* Valor principal Especial para Alerta (Vermelho) */
+    .kpi-value-alert {
+        font-family: 'IBM Plex Sans', sans-serif;
         color: #d9534f;
+        font-size: 34px;
+        font-weight: 700;
+        margin-bottom: 0px;
     }
+    
+    /* Rótulo da Fila Acima dos Cards */
+    .queue-title {
+        margin-top: 30px;
+        margin-bottom: 5px;
+        border-bottom: 2px solid #eaeaea;
+        padding-bottom: 5px;
+    }
+
+    /* Botão Detalhar discreto abaixo dos cards */
     .stButton>button {
         width: 100%;
-        border-radius: 5px;
+        border-radius: 6px;
         border: 1px solid #dcdcdc;
         background-color: #ffffff;
         color: #6c757d;
         font-size: 14px;
-        margin-top: 10px;
+        margin-top: 5px;
     }
     .stButton>button:hover {
         border-color: #0c1c2b;
         color: #0c1c2b;
         background-color: #fcfcfc;
     }
-    h1 {
-        font-size: 32px !important;
-        color: #0c1c2b;
+    
+    /* Sidebar visual executivo */
+    .st-emotion-cache-1vt4y43 {
+        color: #0c1c2b !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -69,12 +135,9 @@ def init_connection():
 
 sf = init_connection()
 
-# --- FUNÇÃO DE BUSCA OTIMIZADA (Filtra direto no Banco de Dados) ---
-# A função agora recebe os filtros como parâmetros. Se o usuário mudar o filtro, ela roda de novo.
+# --- FUNÇÃO DE BUSCA OTIMIZADA (Conversa com o BD) ---
 @st.cache_data(ttl=1800) 
 def get_data(periodo_selecionado, incluir_fechados):
-    
-    # 1. Traduzindo a escolha da tela para a linguagem do Salesforce (SOQL)
     mapa_periodos = {
         "Últimos 30 Dias": "LAST_N_DAYS:30",
         "Últimos 60 Dias": "LAST_N_DAYS:60",
@@ -82,13 +145,10 @@ def get_data(periodo_selecionado, incluir_fechados):
         "Este Ano": "THIS_YEAR"
     }
     filtro_data = mapa_periodos[periodo_selecionado]
-    
-    # 2. Traduzindo o botão de incluir fechados
     filtro_status = ""
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # 3. Construindo a Query Dinâmica
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, Status,
@@ -100,9 +160,9 @@ def get_data(periodo_selecionado, incluir_fechados):
       AND CreatedDate = {filtro_data}
       {filtro_status}
     """
-    
     result = sf.query_all(query)
-    sf_base_url = "https://seusalesforce.lightning.force.com/lightning/r/Case/"
+    # URL BASE CORRIGIDA
+    sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
     
     linhas = []
     for record in result['records']:
@@ -138,6 +198,20 @@ def get_data(periodo_selecionado, incluir_fechados):
         
     return pd.DataFrame(linhas)
 
+# --- FUNÇÃO AUXILIAR PARA GERAR O HTML DO CARD (O PONTO CHAVE) ---
+def render_kpi_card(label, value, alert=False):
+    """Gera o HTML para um card KPI único seguindo a imagem de referência."""
+    card_class = "kpi-card" if not alert else "kpi-card-alert"
+    value_class = "kpi-value" if not alert else "kpi-value-alert"
+    
+    html = f"""
+    <div class="{card_class}">
+        <div class="kpi-label">{label}</div>
+        <div class="{value_class}">{value}</div>
+    </div>
+    """
+    return html
+
 # --- BARRA LATERAL (SIDEBAR) CONTROLES DE BUSCA ---
 st.sidebar.title("Filtros de Busca")
 st.sidebar.markdown(f"Última Atualização: `{st.session_state.last_update}`")
@@ -150,16 +224,13 @@ if st.sidebar.button("🔄 Sincronizar Agora", type="primary"):
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Ajuste os dados que deseja carregar:**")
 
-# Filtros que afetam diretamente o Salesforce
 periodo_selecionado = st.sidebar.selectbox(
     "Período de Abertura", 
     ["Últimos 30 Dias", "Últimos 60 Dias", "Últimos 90 Dias", "Este Ano"],
-    index=0 # Deixa "Últimos 30 Dias" como padrão
+    index=0
 )
+incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 
-incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False) # Vem desmarcado por padrão
-
-# Busca os dados usando os filtros selecionados
 df_filtrado = get_data(periodo_selecionado, incluir_fechados)
 
 # --- TELA PRINCIPAL ---
@@ -175,11 +246,11 @@ if st.session_state.fila_selecionada is None:
     if df_filtrado.empty:
         st.info("Nenhum caso encontrado para os filtros selecionados.")
     else:
-        filas_principais = df_filtrado['Fila Principal'].unique()
-        cols = st.columns(3)
+        st.subheader("Resumo Executivo por Fila")
         
-        for i, fila in enumerate(filas_principais):
-            col = cols[i % 3]
+        filas_principais = df_filtrado['Fila Principal'].unique()
+        
+        for fila in filas_principais:
             df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
             
             vol_total = len(df_fila)
@@ -187,24 +258,29 @@ if st.session_state.fila_selecionada is None:
             fechados = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
             atrasados = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
             
-            with col:
-                st.markdown(f"<h3 style='font-size: 20px; color: #0c1c2b; margin-bottom: -15px;'>{fila}</h3>", unsafe_allow_html=True)
-                inner_col1, inner_col2, inner_col3 = st.columns(3)
-                with inner_col1:
-                    st.metric("Volume", vol_total)
-                with inner_col2:
-                    st.metric("🟠 Ativos", em_tratativa)
-                with inner_col3:
-                    st.metric("🔴 Atrasados", atrasados)
-                
-                if st.button("Detalhar", key=f"btn_{fila}"):
-                    st.session_state.fila_selecionada = fila
-                    st.rerun()
+            # Cabeçalho da Fila
+            st.markdown(f"<h3 class='queue-title'>{fila}</h3>", unsafe_allow_html=True)
             
-            if (i + 1) % 3 == 0:
-                st.markdown("<br>", unsafe_allow_html=True)
+            # --- CONSTRUÇÃO DA LINHA DE CARDS USANDO HTML ---
+            # Aqui juntamos os 4 cards numa mesma linha horizontal.
+            cards_html = f"""
+            <div class="kpi-row-container">
+                {render_kpi_card("Volume Total", vol_total)}
+                {render_kpi_card("Em Tratativa", em_tratativa)}
+                {render_kpi_card("Fechados", fechados)}
+                {render_kpi_card("SLA Atrasado (Ativos)", atrasados, alert=(atrasados > 0))}
+            </div>
+            """
+            st.markdown(cards_html, unsafe_allow_html=True)
+            
+            # Botão Detalhar discreto abaixo dos cards (mantendo funcionalidade Streamlit)
+            if st.button("🔍 Detalhar", key=f"btn_{fila}"):
+                st.session_state.fila_selecionada = fila
+                st.rerun()
+            
+            st.markdown("<br>", unsafe_allow_html=True) # Espaçamento
 
-# --- VISÃO 2: DETALHE DA FILA ---
+# --- VISÃO 2: DETALHE DA FILA (Inalterada, pois já estava executiva) ---
 else:
     fila_atual = st.session_state.fila_selecionada
     st.subheader(f"Visão Detalhada: {fila_atual}")
@@ -246,6 +322,7 @@ else:
         column_config={
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
+            # CONFIGURAÇÃO CORRIGIDA PARA ESCONDER O ID FEIO
             "ID do Caso": None
         },
         use_container_width=True,
