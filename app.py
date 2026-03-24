@@ -6,34 +6,45 @@ from datetime import datetime
 import plotly.express as px
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Gestão de Casos OA", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
 
-# --- CSS CUSTOMIZADO GERAL ---
+# --- CSS CUSTOMIZADO (BRANCO, SEM CABEÇALHO, PASTINHAS) ---
 st.markdown("""
     <style>
-    .stApp { background-color: #f4f6f9; }
-    h1, h2, h3 { color: #1a2935; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    .stButton>button {
-        width: 100%;
-        background-color: transparent;
-        border: 1px solid #c8d1d8;
-        color: #1a2935;
-        font-weight: 600;
-        border-radius: 6px;
-        transition: all 0.2s;
-        margin-top: -10px;
+    /* 1. Remove Fundo Cinza e Cabeçalhos Nativos do Streamlit */
+    .stApp { background-color: #ffffff !important; }
+    header { visibility: hidden !important; height: 0px !important; display: none !important; }
+    #MainMenu { visibility: hidden !important; display: none !important; }
+    footer { visibility: hidden !important; display: none !important; }
+    .block-container { padding-top: 2rem !important; } /* Sobe o conteúdo */
+    
+    h1, h2, h3 { color: #1a2935; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    
+    /* 2. Estilo das Pastinhas (Expanders) */
+    div[data-testid="stExpander"] {
+        border: 1px solid #dce1e6 !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.03) !important;
+        margin-bottom: 12px !important;
+        background-color: #ffffff !important;
     }
-    .stButton>button:hover {
-        border-color: #0056b3;
-        color: #0056b3;
-        background-color: #f0f7ff;
+    div[data-testid="stExpander"] summary {
+        background-color: #f8fbff !important; /* Azul bem clarinho para a aba da pasta */
+        border-radius: 8px !important;
+        padding: 10px 15px !important;
+    }
+    div[data-testid="stExpander"] summary:hover {
+        background-color: #f0f7ff !important;
+    }
+    div[data-testid="stExpander"] summary p {
+        font-size: 18px !important;
+        font-weight: 600 !important;
+        color: #0056b3 !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
 # --- CONTROLE DE ESTADO ---
-if 'fila_selecionada' not in st.session_state:
-    st.session_state.fila_selecionada = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%d/%m/%Y %H:%M")
 
@@ -63,6 +74,7 @@ def get_data(periodo_selecionado, incluir_fechados):
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # QUERY ATUALIZADA: Pega tudo que é OA *OU* tudo que está na CARTEIRA (ignorando OS)
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, Status,
@@ -70,7 +82,7 @@ def get_data(periodo_selecionado, incluir_fechados):
         Origin, Type, FOZ_Motivo__c, FOZ_Detalhe__c, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones)
     FROM Case 
-    WHERE Type = 'OA'
+    WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND Type != 'OS'))
       AND CreatedDate = {filtro_data}
       {filtro_status}
     """
@@ -81,9 +93,10 @@ def get_data(periodo_selecionado, incluir_fechados):
     for record in result['records']:
         dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
         
+        # LISTA DE FILAS ATUALIZADA (COM BACKOFFICE)
         filas_conhecidas = [
             "ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
-            "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO"
+            "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
         ]
         
         if dono_upper in filas_conhecidas:
@@ -115,11 +128,9 @@ def get_data(periodo_selecionado, incluir_fechados):
         
     return pd.DataFrame(linhas)
 
-# --- CORREÇÃO DO GERADOR VISUAL DE CARDS ---
+# --- GERADOR VISUAL DE CARDS ---
 def render_kpi_row(metricas):
-    # Todo o código HTML colado na margem esquerda para o Streamlit não quebrar
-    html = '<div style="display: flex; justify-content: space-between; gap: 15px; margin-bottom: 20px; width: 100%;">'
-    
+    html = '<div style="display: flex; justify-content: space-between; gap: 15px; margin-bottom: 25px; margin-top: 10px; width: 100%;">'
     for metrica in metricas:
         label = metrica['label']
         valor = metrica['valor']
@@ -153,32 +164,34 @@ incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 df_filtrado = get_data(periodo_selecionado, incluir_fechados)
 
 # --- TELA PRINCIPAL ---
-st.markdown("<h1 style='font-size: 28px; margin-bottom: 10px;'>Visão de Casos OA</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='font-size: 28px; margin-bottom: 20px;'>Visão de Casos (OA e Carteiras)</h1>", unsafe_allow_html=True)
 
-if st.button("⬅️ Voltar para Visão Geral", disabled=(st.session_state.fila_selecionada is None)):
-    st.session_state.fila_selecionada = None
-    st.rerun()
-
-st.markdown("<hr style='margin-top: 5px; margin-bottom: 20px; border-top: 1px solid #dce1e6;'>", unsafe_allow_html=True)
-
-# --- VISÃO 1: CARDS GERAIS ---
-if st.session_state.fila_selecionada is None:
-    if df_filtrado.empty:
-        st.info("Nenhum caso encontrado para os filtros selecionados.")
+if df_filtrado.empty:
+    st.info("Nenhum caso encontrado para os filtros selecionados.")
+else:
+    # ORDENAÇÃO DAS FILAS (Garante que "ATRIBUÍDO AO USUÁRIO" seja sempre a última)
+    todas_filas = df_filtrado['Fila Principal'].unique().tolist()
+    
+    if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
+        todas_filas.remove("ATRIBUÍDO AO USUÁRIO")
+        filas_ordenadas = sorted(todas_filas)
+        filas_ordenadas.append("ATRIBUÍDO AO USUÁRIO")
     else:
-        filas_principais = sorted(df_filtrado['Fila Principal'].unique())
+        filas_ordenadas = sorted(todas_filas)
+    
+    # --- CRIAÇÃO DAS PASTINHAS (EXPANDERS) ---
+    for fila in filas_ordenadas:
+        df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
         
-        for fila in filas_principais:
-            df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
+        vol_total = len(df_fila)
+        em_tratativa = len(df_fila[df_fila['Macro Status'] == 'Em Tratativa'])
+        fechados = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
+        atrasados = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
+        
+        # Cria a pastinha com o nome da fila e o volume total para bater o olho rápido
+        with st.expander(f"📁 {fila} ({vol_total} Casos)", expanded=False):
             
-            vol_total = len(df_fila)
-            em_tratativa = len(df_fila[df_fila['Macro Status'] == 'Em Tratativa'])
-            fechados = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
-            atrasados = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
-            
-            st.markdown(f"<h3 style='font-size: 18px; margin-bottom: 15px; color: #2c3e50;'>Fila: {fila}</h3>", unsafe_allow_html=True)
-            
-            # --- RENDERIZA OS CARDS ---
+            # 1. Desenha os Cards dentro da pasta
             metricas = [
                 {'label': 'Volume Total', 'valor': vol_total},
                 {'label': 'Em Tratativa', 'valor': em_tratativa},
@@ -187,54 +200,44 @@ if st.session_state.fila_selecionada is None:
             ]
             st.markdown(render_kpi_row(metricas), unsafe_allow_html=True)
             
-            # --- BOTÃO DETALHAR ---
-            if st.button(f"🔍 Detalhar Fila {fila}", key=f"btn_{fila}"):
-                st.session_state.fila_selecionada = fila
-                st.rerun()
+            # 2. Desenha os Gráficos dentro da pasta
+            col_chart1, col_chart2 = st.columns(2)
+            with col_chart1:
+                label_grf1 = 'Casos por Usuário' if fila != 'CORPORATIVO' else 'Casos por Carteira'
+                df_grp = df_fila['Subfila'].value_counts().reset_index()
+                fig_grp = px.bar(df_grp, x='count', y='Subfila', orientation='h', title=label_grf1, labels={'count': 'Volume', 'Subfila': ''})
+                fig_grp.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0), yaxis={'categoryorder':'total ascending'}, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_grp, use_container_width=True)
                 
-            st.markdown("<br>", unsafe_allow_html=True)
+            with col_chart2:
+                df_sla = df_fila['SLA Atrasado'].value_counts().reset_index()
+                fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.6, title='Saúde do SLA (Total)', color='SLA Atrasado', color_discrete_map={'Não':'#0056b3', 'Sim':'#d9534f'})
+                fig_sla.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_sla, use_container_width=True)
 
-# --- VISÃO 2: DETALHE DA FILA ---
-else:
-    fila_atual = st.session_state.fila_selecionada
-    st.markdown(f"<h3 style='font-size: 22px;'>Fila: {fila_atual}</h3>", unsafe_allow_html=True)
-    df_extrato = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
-    
-    col_chart1, col_chart2 = st.columns(2)
-    with col_chart1:
-        label_grf1 = 'Casos OA por Usuário' if fila_atual != 'CORPORATIVO' else 'Casos OA por Carteira'
-        df_grp = df_extrato['Subfila'].value_counts().reset_index()
-        fig_grp = px.bar(df_grp, x='count', y='Subfila', orientation='h', title=label_grf1, labels={'count': 'Volume', 'Subfila': ''})
-        fig_grp.update_layout(height=320, margin=dict(l=0, r=0, t=40, b=0), yaxis={'categoryorder':'total ascending'}, plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_grp, use_container_width=True)
-        
-    with col_chart2:
-        df_sla = df_extrato['SLA Atrasado'].value_counts().reset_index()
-        fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.6, title='Saúde do SLA (Total)', color='SLA Atrasado', color_discrete_map={'Não':'#0056b3', 'Sim':'#d9534f'})
-        fig_sla.update_layout(height=320, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(fig_sla, use_container_width=True)
+            # 3. Desenha a Tabela e Botão Excel dentro da pasta
+            st.markdown("---")
+            def to_excel(df_export):
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_export.to_excel(writer, index=False, sheet_name='Extrato')
+                return output.getvalue()
 
-    def to_excel(df_export):
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_export.to_excel(writer, index=False, sheet_name='ExtratoOA')
-        return output.getvalue()
-
-    st.download_button(
-        label="📥 Baixar Extrato em Excel",
-        data=to_excel(df_extrato),
-        file_name=f'extrato_{fila_atual.replace(" ", "_").lower()}.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        type="primary"
-    )
-    
-    st.dataframe(
-        df_extrato,
-        column_config={
-            "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
-            "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
-            "ID do Caso": None
-        },
-        use_container_width=True,
-        hide_index=True
-    )
+            st.download_button(
+                label=f"📥 Baixar Extrato: {fila}",
+                data=to_excel(df_fila),
+                file_name=f'extrato_{fila.replace(" ", "_").lower()}.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                key=f"dl_{fila}" # Chave única necessária quando há vários botões de download
+            )
+            
+            st.dataframe(
+                df_fila,
+                column_config={
+                    "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
+                    "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
+                    "ID do Caso": None
+                },
+                use_container_width=True,
+                hide_index=True
+            )
