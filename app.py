@@ -8,41 +8,37 @@ import plotly.express as px
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
 
-# --- CSS CUSTOMIZADO (BRANCO, SEM CABEÇALHO, PASTINHAS) ---
+# --- CSS CUSTOMIZADO (CARDS QUADRADOS E LIMPEZA) ---
 st.markdown("""
     <style>
-    .stApp { background-color: #ffffff !important; }
+    .stApp { background-color: #f8f9fa !important; }
     header { visibility: hidden !important; height: 0px !important; display: none !important; }
     #MainMenu { visibility: hidden !important; display: none !important; }
     footer { visibility: hidden !important; display: none !important; }
-    .block-container { padding-top: 2rem !important; }
+    .block-container { padding-top: 1.5rem !important; padding-bottom: 1rem !important; }
     
-    h1, h2, h3 { color: #1a2935; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    h1 { font-size: 24px !important; margin-bottom: 20px !important; color: #1a2935; }
     
-    div[data-testid="stExpander"] {
-        border: 1px solid #dce1e6 !important;
-        border-radius: 8px !important;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.03) !important;
-        margin-bottom: 12px !important;
-        background-color: #ffffff !important;
-    }
-    div[data-testid="stExpander"] summary {
-        background-color: #f8fbff !important;
-        border-radius: 8px !important;
-        padding: 10px 15px !important;
-    }
-    div[data-testid="stExpander"] summary:hover {
-        background-color: #f0f7ff !important;
-    }
-    div[data-testid="stExpander"] summary p {
-        font-size: 18px !important;
-        font-weight: 600 !important;
+    /* Remove a margem superior dos botões que ficam embaixo dos cards */
+    .stButton>button {
+        border-radius: 0px 0px 8px 8px !important;
+        border-top: none !important;
+        background-color: #f1f3f5 !important;
         color: #0056b3 !important;
+        font-weight: 600 !important;
+        margin-top: -15px !important;
+        border: 1px solid #dce1e6 !important;
+    }
+    .stButton>button:hover {
+        background-color: #0056b3 !important;
+        color: white !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
 # --- CONTROLE DE ESTADO ---
+if 'fila_selecionada' not in st.session_state:
+    st.session_state.fila_selecionada = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%d/%m/%Y %H:%M")
 
@@ -60,28 +56,33 @@ sf = init_connection()
 
 # --- FUNÇÃO DE BUSCA OTIMIZADA ---
 @st.cache_data(ttl=1800) 
-def get_data(periodo_selecionado, incluir_fechados):
-    mapa_periodos = {
-        "Últimos 30 Dias": "LAST_N_DAYS:30",
-        "Últimos 60 Dias": "LAST_N_DAYS:60",
-        "Últimos 90 Dias": "LAST_N_DAYS:90",
-        "Este Ano": "THIS_YEAR"
-    }
-    filtro_data = mapa_periodos[periodo_selecionado]
+def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
+    if periodo_selecionado == "Personalizado" and dt_inicio and dt_fim:
+        inicio_str = dt_inicio.strftime('%Y-%m-%dT00:00:00Z')
+        fim_str = dt_fim.strftime('%Y-%m-%dT23:59:59Z')
+        filtro_data = f"CreatedDate >= {inicio_str} AND CreatedDate <= {fim_str}"
+    else:
+        mapa_periodos = {
+            "Últimos 30 Dias": "LAST_N_DAYS:30",
+            "Últimos 60 Dias": "LAST_N_DAYS:60",
+            "Últimos 90 Dias": "LAST_N_DAYS:90",
+            "Este Ano": "THIS_YEAR"
+        }
+        filtro_data = f"CreatedDate = {mapa_periodos.get(periodo_selecionado, 'LAST_N_DAYS:30')}"
+
     filtro_status = ""
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # QUERY CORRIGIDA: Inclui Type nulo ou diferente de OS para Carteiras
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, Status,
         Account.Name, Account.FOZ_CPF__c,
-        Origin, Type, FOZ_Motivo__c, FOZ_Detalhe__c, Owner.Name, 
+        Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones)
     FROM Case 
     WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)))
-      AND CreatedDate = {filtro_data}
+      AND {filtro_data}
       {filtro_status}
     """
     result = sf.query_all(query)
@@ -116,38 +117,48 @@ def get_data(periodo_selecionado, incluir_fechados):
             'Abertura': pd.to_datetime(record['CreatedDate']).tz_localize(None),
             'Fila Principal': fila_principal,
             'Subfila': subfila,
-            'Origem': record['Origin'],  # NOVO CAMPO
-            'Tipo': record['Type'] if record['Type'] else 'Sem Tipo', # NOVO CAMPO (Exibe se for e-mail vazio)
+            'Origem': record['Origin'],
+            'Tipo Salesforce': record['Type'] if record['Type'] else 'Sem Tipo',
+            'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
+            'Motivo': record['FOZ_Motivo__c'],
+            'Detalhe': record['FOZ_Detalhe__c'],
+            'Subdetalhe': record['FOZ_Subdetalhe__c'],
             'Status': record['Status'],
             'Macro Status': macro_status,
             'SLA Atrasado': 'Sim' if sla_atrasado else 'Não',
-            'Conta': record['Account']['Name'] if record['Account'] else '-',
-            'Motivo': record['FOZ_Motivo__c']
+            'Conta': record['Account']['Name'] if record['Account'] else '-'
         })
         
     return pd.DataFrame(linhas)
 
-# --- GERADOR VISUAL DE CARDS ---
-def render_kpi_row(metricas):
-    html = '<div style="display: flex; justify-content: space-between; gap: 15px; margin-bottom: 20px; margin-top: 5px; width: 100%;">'
-    for metrica in metricas:
-        label = metrica['label']
-        valor = metrica['valor']
-        is_alert = metrica.get('alert', False)
-        
-        cor_borda = "#d9534f" if is_alert else "#0056b3"
-        cor_texto = "#d9534f" if is_alert else "#0056b3"
-        
-        html += f'''
-<div style="background-color: #ffffff; border: 1px solid #e0e0e0; border-top: 4px solid {cor_borda}; border-radius: 8px; padding: 20px 10px; flex: 1; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.02);">
-<div style="color: #6a747f; font-size: 12px; font-weight: 700; text-transform: uppercase; margin-bottom: 8px;">{label}</div>
-<div style="color: {cor_texto}; font-size: 32px; font-weight: 700;">{valor}</div>
-</div>
-'''
-    html += '</div>'
-    return html
+# --- FUNÇÃO PARA DESENHAR O CARD QUADRADO ---
+def desenhar_card(fila_nome, df_fila):
+    vol = len(df_fila)
+    trat = len(df_fila[df_fila['Macro Status'] == 'Em Tratativa'])
+    fech = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
+    atr = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
+    
+    cor_atraso = "#d9534f" if atr > 0 else "#555555"
+    
+    # HTML do Card Visual Quadrado
+    html_card = f"""
+    <div style="background-color: white; border: 1px solid #dce1e6; border-radius: 8px 8px 0px 0px; padding: 15px; height: 145px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: space-between;">
+        <h4 style="margin: 0; padding: 0; color: #0c1c2b; font-size: 15px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px;">{fila_nome}</h4>
+        <div style="font-size: 13px; color: #495057; line-height: 1.6; margin-top: 10px;">
+            <div style="display: flex; justify-content: space-between;"><span>Casos:</span> <b>{vol}</b></div>
+            <div style="display: flex; justify-content: space-between;"><span>Em tratativa:</span> <b>{trat}</b></div>
+            <div style="display: flex; justify-content: space-between;"><span>Fechados:</span> <b>{fech}</b></div>
+            <div style="display: flex; justify-content: space-between; border-top: 1px dashed #eee; margin-top: 4px; padding-top: 4px;"><span>SLA Atrasado:</span> <b style="color: {cor_atraso};">{atr}</b></div>
+        </div>
+    </div>
+    """
+    st.markdown(html_card, unsafe_allow_html=True)
+    # Botão que fica "grudado" no card HTML via CSS
+    if st.button(f"Abrir Detalhe", key=f"btn_{fila_nome}", use_container_width=True):
+        st.session_state.fila_selecionada = fila_nome
+        st.rerun()
 
-# --- BARRA LATERAL (SIDEBAR) ---
+# --- MENU LATERAL (SIDEBAR) ---
 st.sidebar.title("Filtros")
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
@@ -157,105 +168,125 @@ if st.sidebar.button("🔄 Sincronizar Agora", type="primary"):
     st.rerun()
 
 st.sidebar.markdown("---")
-periodo_selecionado = st.sidebar.selectbox("Período de Abertura", ["Últimos 30 Dias", "Últimos 60 Dias", "Últimos 90 Dias", "Este Ano"], index=0)
-incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
+opcoes_periodo = ["Últimos 30 Dias", "Últimos 60 Dias", "Últimos 90 Dias", "Este Ano", "Personalizado"]
+periodo_selecionado = st.sidebar.selectbox("Período de Abertura", opcoes_periodo, index=0)
 
-df_filtrado = get_data(periodo_selecionado, incluir_fechados)
-
-# --- TELA PRINCIPAL ---
-st.markdown("<h1 style='font-size: 28px; margin-bottom: 20px;'>Visão de Casos (OA e Corporativo)</h1>", unsafe_allow_html=True)
-
-if df_filtrado.empty:
-    st.info("Nenhum caso encontrado para os filtros selecionados.")
-else:
-    todas_filas = df_filtrado['Fila Principal'].unique().tolist()
-    if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
-        todas_filas.remove("ATRIBUÍDO AO USUÁRIO")
-        filas_ordenadas = sorted(todas_filas)
-        filas_ordenadas.append("ATRIBUÍDO AO USUÁRIO")
+dt_inicio, dt_fim = None, None
+if periodo_selecionado == "Personalizado":
+    datas = st.sidebar.date_input("Selecione o intervalo (Início e Fim)", [])
+    if len(datas) == 2:
+        dt_inicio, dt_fim = datas
     else:
-        filas_ordenadas = sorted(todas_filas)
+        st.sidebar.warning("Selecione a data de início e fim no calendário para carregar.")
+        st.stop()
+
+incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
+df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados)
+
+# --- ORDENAÇÃO DAS FILAS ---
+todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
+if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
+    todas_filas.remove("ATRIBUÍDO AO USUÁRIO")
+    filas_ordenadas = sorted(todas_filas)
+    filas_ordenadas.append("ATRIBUÍDO AO USUÁRIO")
+else:
+    filas_ordenadas = sorted(todas_filas)
+
+# --- RENDERIZAÇÃO DA TELA (VISÃO GERAL VS ABA LATERAL) ---
+if df_filtrado.empty:
+    st.markdown("<h1>Visão Operacional - Casos OA</h1>", unsafe_allow_html=True)
+    st.info("Nenhum caso encontrado para os filtros selecionados.")
     
-    # --- CRIAÇÃO DAS PASTINHAS (EXPANDERS) ---
-    for fila in filas_ordenadas:
-        df_fila_orig = df_filtrado[df_filtrado['Fila Principal'] == fila]
-        vol_pasta = len(df_fila_orig)
+elif st.session_state.fila_selecionada is None:
+    # VISÃO 1: GRID DE CARDS QUADRADOS
+    st.markdown("<h1>Visão Operacional - Escolha uma Fila</h1>", unsafe_allow_html=True)
+    
+    # Cria colunas para organizar os cards em formato de grade (4 por linha)
+    cols = st.columns(4)
+    for i, fila in enumerate(filas_ordenadas):
+        df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
+        with cols[i % 4]:
+            desenhar_card(fila, df_fila)
+            st.markdown("<br>", unsafe_allow_html=True)
+
+else:
+    # VISÃO 2: EFEITO "ABA LATERAL" (Master-Detail)
+    # A tela divide: 25% para os cards empilhados na esquerda, 75% para os detalhes na direita
+    fila_atual = st.session_state.fila_selecionada
+    col_menu, col_detalhe = st.columns([1, 3], gap="large")
+    
+    with col_menu:
+        if st.button("⬅️ Voltar para Grade", use_container_width=True, type="primary"):
+            st.session_state.fila_selecionada = None
+            st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)
         
-        with st.expander(f"📁 {fila} ({vol_pasta} Casos)", expanded=False):
+        # Desenha os cards em uma lista vertical fina
+        for fila in filas_ordenadas:
+            df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
+            desenhar_card(fila, df_fila)
+            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
             
-            # --- LÓGICA DE FILTRO INTERNO PARA CARTEIRAS ---
-            df_view = df_fila_orig.copy()
-            
-            if fila == "CORPORATIVO":
-                carteiras_disponiveis = sorted(df_view['Subfila'].unique().tolist())
-                # Cria um selectbox discreto dentro da pasta
-                col_filtro, _ = st.columns([1, 2])
-                with col_filtro:
-                    carteira_selecionada = st.selectbox(
-                        "📌 Filtrar Carteira Específica:", 
-                        ["Todas"] + carteiras_disponiveis, 
-                        key=f"sel_{fila}"
-                    )
-                if carteira_selecionada != "Todas":
-                    df_view = df_view[df_view['Subfila'] == carteira_selecionada]
-
-            # 1. Recalcula as métricas baseadas no filtro (se houver)
-            vol_total = len(df_view)
-            em_tratativa = len(df_view[df_view['Macro Status'] == 'Em Tratativa'])
-            fechados = len(df_view[df_view['Macro Status'] == 'Fechado'])
-            atrasados = len(df_view[(df_view['SLA Atrasado'] == 'Sim') & (df_view['Macro Status'] == 'Em Tratativa')])
-            
-            # 2. Desenha os Cards
-            metricas = [
-                {'label': 'Volume', 'valor': vol_total},
-                {'label': 'Em Tratativa', 'valor': em_tratativa},
-                {'label': 'Fechados', 'valor': fechados},
-                {'label': 'SLA Atrasado (Ativos)', 'valor': atrasados, 'alert': atrasados > 0}
-            ]
-            st.markdown(render_kpi_row(metricas), unsafe_allow_html=True)
-            
-            # 3. Desenha os Gráficos
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                label_grf1 = 'Casos por Usuário' if fila != 'CORPORATIVO' else 'Casos por Carteira'
-                df_grp = df_view['Subfila'].value_counts().reset_index()
-                fig_grp = px.bar(df_grp, x='count', y='Subfila', orientation='h', title=label_grf1, labels={'count': 'Volume', 'Subfila': ''})
-                fig_grp.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0), yaxis={'categoryorder':'total ascending'}, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_grp, use_container_width=True)
+    with col_detalhe:
+        st.markdown(f"<h2 style='margin-top: 0px; color: #0056b3;'>Detalhes da Fila: {fila_atual}</h2>", unsafe_allow_html=True)
+        df_view = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
+        
+        # Filtro de Carteira Corporativa (aparece só no detalhe se for o caso)
+        if fila_atual == "CORPORATIVO":
+            carteiras_disp = sorted(df_view['Subfila'].unique().tolist())
+            cart_sel = st.selectbox("📌 Filtrar Carteira Específica:", ["Todas"] + carteiras_disp)
+            if cart_sel != "Todas":
+                df_view = df_view[df_view['Subfila'] == cart_sel]
                 
-            with col_chart2:
-                df_sla = df_view['SLA Atrasado'].value_counts().reset_index()
-                # Se não houver dados no filtro, exibe gráfico vazio elegantemente
-                if df_sla.empty:
-                    df_sla = pd.DataFrame({'SLA Atrasado': ['Sem Dados'], 'count': [1]})
-                fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.6, title='Saúde do SLA (Total)', color='SLA Atrasado', color_discrete_map={'Não':'#0056b3', 'Sim':'#d9534f', 'Sem Dados':'#e0e0e0'})
-                fig_sla.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_sla, use_container_width=True)
+        # Gráficos Executivos (Idade e Ofensores)
+        c1, c2 = st.columns(2)
+        with c1:
+            df_abertos = df_view[df_view['Macro Status'] == 'Em Tratativa'].copy()
+            if not df_abertos.empty:
+                df_abertos['Idade'] = (datetime.now() - df_abertos['Abertura']).dt.days
+                bins = [-1, 3, 7, 10000]
+                labels = ['0 a 3 Dias', '4 a 7 Dias', '+7 Dias']
+                df_abertos['Faixa'] = pd.cut(df_abertos['Idade'], bins=bins, labels=labels)
+                df_age = df_abertos['Faixa'].value_counts().reindex(labels).reset_index()
+                
+                fig_age = px.bar(df_age, x='Faixa', y='count', title='Idade dos Casos Abertos', text='count', color='Faixa',
+                                 color_discrete_map={'0 a 3 Dias':'#0056b3', '4 a 7 Dias':'#f0ad4e', '+7 Dias':'#d9534f'})
+                fig_age.update_traces(textposition='outside', showlegend=False)
+                fig_age.update_layout(height=260, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_age, use_container_width=True)
+            else:
+                st.info("Nenhum caso em aberto.")
+                
+        with c2:
+            df_view['Motivo Real'] = df_view['Motivo'].fillna(df_view['Tipo Solicitação']).fillna('Sem Classificação')
+            df_of = df_view['Motivo Real'].value_counts().reset_index().head(5).sort_values(by='count')
+            fig_of = px.bar(df_of, x='count', y='Motivo Real', orientation='h', title='Top 5 Ofensores', text='count')
+            fig_of.update_traces(textposition='outside', marker_color='#17a2b8')
+            fig_of.update_layout(height=260, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_of, use_container_width=True)
 
-            # 4. Tabela e Excel
-            st.markdown("---")
-            def to_excel(df_export):
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_export.to_excel(writer, index=False, sheet_name='Extrato')
-                return output.getvalue()
+        st.markdown("---")
+        
+        def to_excel(df_export):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_export.to_excel(writer, index=False, sheet_name='Extrato')
+            return output.getvalue()
 
-            st.download_button(
-                label=f"📥 Baixar Extrato",
-                data=to_excel(df_view),
-                file_name=f'extrato_{fila.replace(" ", "_").lower()}.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                key=f"dl_{fila}"
-            )
-            
-            # Tabela agora exibe as colunas Origem e Tipo para rastrear os casos corporativos
-            st.dataframe(
-                df_view,
-                column_config={
-                    "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
-                    "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
-                    "ID do Caso": None
-                },
-                use_container_width=True,
-                hide_index=True
-            )
+        st.download_button(
+            label=f"📥 Baixar Extrato Completo ({len(df_view)} registros)",
+            data=to_excel(df_view),
+            file_name=f'extrato_{fila_atual.replace(" ", "_").lower()}.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        
+        st.dataframe(
+            df_view,
+            column_config={
+                "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
+                "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
+                "ID do Caso": None
+            },
+            use_container_width=True,
+            hide_index=True
+        )
