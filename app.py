@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from simple_salesforce import Salesforce
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import plotly.express as px
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -43,11 +43,14 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- FUSO HORÁRIO BRASIL (UTC -3) ---
+fuso_br = timezone(timedelta(hours=-3))
+
 # --- CONTROLE DE ESTADO ---
 if 'fila_selecionada' not in st.session_state:
     st.session_state.fila_selecionada = None
 if 'last_update' not in st.session_state:
-    st.session_state.last_update = datetime.now().strftime("%d/%m/%Y %H:%M")
+    st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
 
 # --- CONEXÃO COM SALESFORCE ---
 @st.cache_resource
@@ -81,7 +84,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # QUERY ATUALIZADA: Inclusão do ClosedDate
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status,
@@ -118,7 +120,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         macro_status = "Fechado" if record['Status'] in ['Closed', 'Fechado'] else "Em Tratativa"
         sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
         
-        # Tratamento da Data de Fechamento (Evita erro se estiver nulo)
         data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
         
         linhas.append({
@@ -130,7 +131,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             'Fila Principal': fila_principal,
             'Subfila': subfila,
             'Origem': record['Origin'],
-            'Tipo Salesforce': record['Type'] if record['Type'] else 'E-mail', # Ajuste de regra do E-mail
+            'Tipo Salesforce': record['Type'] if record['Type'] else 'E-mail',
             'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
             'Motivo': record['FOZ_Motivo__c'],
             'Detalhe': record['FOZ_Detalhe__c'],
@@ -169,17 +170,18 @@ def desenhar_card(fila_nome, df_fila):
         st.rerun()
 
 # --- MENU LATERAL (SIDEBAR) ---
-# Tenta carregar a imagem. Se a imagem não for encontrada, ele ignora sem quebrar o site.
+# Tenta carregar a logo atualizada (.png). 
 try:
-    st.sidebar.image("Salesforce.jfif", use_container_width=True)
+    st.sidebar.image("Salesforce.png", use_container_width=True)
 except Exception:
     st.sidebar.markdown("<h2>Filtros</h2>", unsafe_allow_html=True)
 
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
+# Botão de Sincronizar (atualiza a hora e limpa o cache)
 if st.sidebar.button("🔄 Sincronizar Agora", type="primary"):
     st.cache_data.clear()
-    st.session_state.last_update = datetime.now().strftime("%d/%m/%Y %H:%M")
+    st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -209,12 +211,12 @@ else:
 
 # --- RENDERIZAÇÃO DA TELA PRINCIPAL ---
 if df_filtrado.empty:
-    st.markdown("<h1>Visão Operacional - Casos</h1>", unsafe_allow_html=True)
+    st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
     st.info("Nenhum caso encontrado para os filtros selecionados.")
     
 elif st.session_state.fila_selecionada is None:
-    # VISÃO 1: GRID DE CARDS QUADRADOS
-    st.markdown("<h1>Visão Operacional - Escolha uma Fila</h1>", unsafe_allow_html=True)
+    # VISÃO 1: GRID DE CARDS QUADRADOS (TÍTULO ATUALIZADO)
+    st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
     
     cols = st.columns(4)
     for i, fila in enumerate(filas_ordenadas):
@@ -250,7 +252,8 @@ else:
     with c1:
         df_abertos = df_view[df_view['Macro Status'] == 'Em Tratativa'].copy()
         if not df_abertos.empty:
-            df_abertos['Idade'] = (datetime.now() - df_abertos['Abertura']).dt.days
+            # Pega o horário atual (em UTC limpo) para comparar corretamente com o horário que veio do Salesforce (que é UTC convertido para base limpa)
+            df_abertos['Idade'] = (datetime.now(timezone.utc).replace(tzinfo=None) - df_abertos['Abertura']).dt.days
             bins = [-1, 3, 7, 10000]
             labels = ['0 a 3 Dias', '4 a 7 Dias', '+7 Dias']
             df_abertos['Faixa'] = pd.cut(df_abertos['Idade'], bins=bins, labels=labels)
@@ -278,7 +281,6 @@ else:
         def to_excel(df_export):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Remove o timezone antes de exportar para evitar erros no Excel
                 df_export['Abertura'] = df_export['Abertura'].dt.tz_localize(None)
                 if df_export['Fechamento'].notna().any():
                     df_export['Fechamento'] = df_export['Fechamento'].dt.tz_localize(None)
@@ -294,7 +296,6 @@ else:
     with col_aviso:
         st.caption("💡 **Dica:** Passe o mouse sobre o cabeçalho de qualquer coluna abaixo e clique no ícone da lupa para aplicar filtros.")
     
-    # Atualização para incluir a formatação da coluna de Fechamento
     st.dataframe(
         df_view,
         column_config={
