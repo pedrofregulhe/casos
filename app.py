@@ -3,31 +3,68 @@ import pandas as pd
 from simple_salesforce import Salesforce
 from io import BytesIO
 from datetime import datetime
+import plotly.express as px
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos OA", layout="wide", initial_sidebar_state="expanded")
 
-# CSS customizado para deixar a interface mais elegante e os cards mais bonitos
+# --- CSS CUSTOMIZADO (Visual Executivo e Clean) ---
 st.markdown("""
     <style>
+    /* Estilo dos Cards de KPI */
     div[data-testid="metric-container"] {
         background-color: #f8f9fa;
         border: 1px solid #e0e0e0;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
+        padding: 18px;
+        border-radius: 10px;
+        box-shadow: 2px 2px 6px rgba(0,0,0,0.04);
     }
+    div[data-testid="stMetricValue"] {
+        color: #0c1c2b;
+        font-weight: 700;
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #6c757d;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    /* Estilo Especial para SLA Atrasado */
+    [data-testid="metric-container"]:nth-child(4) div[data-testid="stMetricValue"] {
+        color: #d9534f;
+    }
+    
+    /* Botão Detalhar discreto */
     .stButton>button {
         width: 100%;
         border-radius: 5px;
-        font-weight: bold;
+        border: 1px solid #dcdcdc;
+        background-color: #ffffff;
+        color: #6c757d;
+        font-size: 14px;
+        margin-top: 10px;
+    }
+    .stButton>button:hover {
+        border-color: #0c1c2b;
+        color: #0c1c2b;
+        background-color: #fcfcfc;
+    }
+    
+    /* Títulos e Sidebar */
+    h1 {
+        font-size: 32px !important;
+        color: #0c1c2b;
+    }
+    .st-emotion-cache-1vt4y43 {
+        color: #0c1c2b !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# --- CONTROLE DE ESTADO (Para o clique nos cards) ---
+# --- CONTROLE DE ESTADO (Para clique e sincronização) ---
 if 'fila_selecionada' not in st.session_state:
     st.session_state.fila_selecionada = None
+if 'last_update' not in st.session_state:
+    st.session_state.last_update = datetime.now().strftime("%d/%m/%Y %H:%M")
 
 # --- CONEXÃO E DADOS ---
 @st.cache_resource
@@ -41,34 +78,26 @@ def init_connection():
 
 sf = init_connection()
 
-# O botão de sincronizar limpa o cache dessa função
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800) # Atualiza a cada 30 minutos
 def get_data():
-    # Adicionei o Id (para o link) e CreatedDate (para o filtro)
+    # FILTRO DE DATA NA QUERY (180 DIAS) PARA EVITAR TRAVAMENTO
     query = """
     SELECT 
         Id, CaseNumber, CreatedDate, Status,
-        Account.Name, Account.FOZ_StatusPosicaoFinanceira__c, Account.FOZ_CPF__c,
-        Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, 
-        Owner.Name, 
+        Account.Name, Account.FOZ_CPF__c,
+        Origin, Type, FOZ_Motivo__c, FOZ_Detalhe__c, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones)
     FROM Case 
     WHERE Type = 'OA'
-    AND CreatedDate = LAST_N_DAYS:90
+      AND CreatedDate = LAST_N_DAYS:180
     """
     result = sf.query_all(query)
-    
-    # URL base do seu Salesforce (ajuste se necessário)
     sf_base_url = "https://seusalesforce.lightning.force.com/lightning/r/Case/"
     
     linhas = []
     for record in result['records']:
-        dono_nome = record['Owner']['Name'] if record['Owner'] else 'SISTEMA/SEM DONO'
-        dono_upper = dono_nome.upper()
-        
-        # --- LÓGICA DE CATEGORIZAÇÃO DAS FILAS ---
-        filas_conhecidas = ["ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
-                            "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF"]
+        dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
+        filas_conhecidas = ["ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF"]
         
         if dono_upper in filas_conhecidas:
             fila_principal = dono_upper
@@ -78,27 +107,19 @@ def get_data():
             subfila = dono_upper
         else:
             fila_principal = "ATRIBUÍDO AO USUÁRIO"
-            subfila = dono_upper # Guarda quem é o usuário
+            subfila = dono_upper
             
-        # --- STATUS E SLA ---
-        status_atual = record['Status']
-        macro_status = "Fechado" if status_atual in ['Closed', 'Fechado'] else "Em Tratativa"
-        
-        sla_atrasado = False
-        if record['CaseMilestones'] and record['CaseMilestones']['records']:
-            for milestone in record['CaseMilestones']['records']:
-                if milestone['IsViolated']:
-                    sla_atrasado = True
-                    break
+        macro_status = "Fechado" if record['Status'] in ['Closed', 'Fechado'] else "Em Tratativa"
+        sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
                     
         linhas.append({
             'ID do Caso': record['Id'],
             'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
             'Número': record['CaseNumber'],
-            'Data de Abertura': pd.to_datetime(record['CreatedDate']).tz_localize(None),
+            'Abertura': pd.to_datetime(record['CreatedDate']).tz_localize(None),
             'Fila Principal': fila_principal,
             'Subfila': subfila,
-            'Status': status_atual,
+            'Status': record['Status'],
             'Macro Status': macro_status,
             'SLA Atrasado': 'Sim' if sla_atrasado else 'Não',
             'Conta': record['Account']['Name'] if record['Account'] else '-',
@@ -108,104 +129,135 @@ def get_data():
     return pd.DataFrame(linhas)
 
 # --- BARRA LATERAL (SIDEBAR) ---
-st.sidebar.title("⚙️ Filtros e Controles")
+st.sidebar.title("Filtros")
 
-if st.sidebar.button("🔄 Sincronizar com Salesforce", type="primary"):
+# Timestamp e Sincronização
+st.sidebar.markdown(f"Última Atualização: `{st.session_state.last_update}`")
+if st.sidebar.button("Sincronizar", type="primary"):
     st.cache_data.clear()
+    st.session_state.last_update = datetime.now().strftime("%d/%m/%Y %H:%M")
     st.rerun()
+
+st.sidebar.markdown("---")
 
 df = get_data()
 
-st.sidebar.markdown("---")
-# Filtro de Data
-min_date = df['Data de Abertura'].min().date() if not df.empty else datetime.today().date()
-max_date = df['Data de Abertura'].max().date() if not df.empty else datetime.today().date()
-datas_selecionadas = st.sidebar.date_input("Período de Abertura", [min_date, max_date], min_value=min_date, max_value=max_date)
+# Filtro de Data simplificado
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    min_date = df['Abertura'].min().date() if not df.empty else datetime.today().date()
+    data_inicio = st.date_input("Início", min_date)
+with col2:
+    max_date = df['Abertura'].max().date() if not df.empty else datetime.today().date()
+    data_fim = st.date_input("Fim", max_date)
 
 # Filtro de Status
 lista_status = df['Status'].unique().tolist()
-status_selecionados = st.sidebar.multiselect("Status do Caso", lista_status, default=lista_status)
+status_selecionados = st.sidebar.multiselect("Status", lista_status, default=lista_status)
 
-# Aplicando os filtros no DataFrame
-if len(datas_selecionadas) == 2:
-    data_inicio, data_fim = datas_selecionadas
-    df_filtrado = df[
-        (df['Data de Abertura'].dt.date >= data_inicio) & 
-        (df['Data de Abertura'].dt.date <= data_fim) &
-        (df['Status'].isin(status_selecionados))
-    ]
-else:
-    df_filtrado = df[df['Status'].isin(status_selecionados)]
+# Aplica filtros
+df_filtrado = df[
+    (df['Abertura'].dt.date >= data_inicio) & 
+    (df['Abertura'].dt.date <= data_fim) &
+    (df['Status'].isin(status_selecionados))
+]
 
-# --- TELA PRINCIPAL: CARDS ---
-st.title("🏛️ Visão Executiva de Casos (OA)")
+# --- TELA PRINCIPAL ---
+st.title("Visão de Casos OA")
+st.markdown("<br>", unsafe_allow_html=True) # Espaçamento
 
-if st.button("⬅️ Voltar para Visão Geral", disabled=(st.session_state.fila_selecionada is None)):
+if st.button("⬅️ Voltar para Visão Geral", disabled=(st.session_state.fila_selecionada is None), type="secondary"):
     st.session_state.fila_selecionada = None
     st.rerun()
 
-# Se não houver fila selecionada, mostra os cards gerais
+# --- VISÃO 1: CARDS GERAIS ---
 if st.session_state.fila_selecionada is None:
-    st.subheader("Resumo por Fila")
+    st.subheader("Resumo Executivo por Fila")
     
     filas_principais = df_filtrado['Fila Principal'].unique()
+    cols = st.columns(3) # Sempre 3 colunas por linha
     
-    # Criando as linhas de cards dinamicamente (3 por linha)
-    cols = st.columns(3)
     for i, fila in enumerate(filas_principais):
         col = cols[i % 3]
         df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
         
+        # Cálculos das métricas
         vol_total = len(df_fila)
         em_tratativa = len(df_fila[df_fila['Macro Status'] == 'Em Tratativa'])
         fechados = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
         atrasados = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
         
         with col:
-            with st.container():
-                st.markdown(f"### {fila}")
-                st.markdown(f"**Volume Total:** {vol_total}")
-                st.markdown(f"🟢 **Fechados:** {fechados} | 🟡 **Em Tratativa:** {em_tratativa}")
-                st.markdown(f"🔴 **SLA Atrasado (Ativos):** {atrasados}")
-                
-                # O botão que simula o clique no card
-                if st.button(f"🔍 Detalhar {fila}", key=f"btn_{fila}"):
-                    st.session_state.fila_selecionada = fila
-                    st.rerun()
-            st.markdown("<br>", unsafe_allow_html=True) # Espaçamento
+            st.markdown(f"<h3 style='font-size: 20px; color: #0c1c2b; margin-bottom: -15px;'>{fila}</h3>", unsafe_allow_html=True)
+            inner_col1, inner_col2, inner_col3 = st.columns(3)
+            with inner_col1:
+                st.metric("Volume", vol_total)
+            with inner_col2:
+                st.metric("🟠 Ativos", em_tratativa)
+            with inner_col3:
+                st.metric("🔴 Atrasados", atrasados)
+            
+            # Botão Detalhar discreto
+            if st.button("Detalhar", key=f"btn_{fila}"):
+                st.session_state.fila_selecionada = fila
+                st.rerun()
+        
+        # Adiciona nova linha a cada 3 cards
+        if (i + 1) % 3 == 0:
+            st.markdown("<br>", unsafe_allow_html=True)
 
-# --- TELA SECUNDÁRIA: EXTRATO DETALHADO ---
+# --- VISÃO 2: DETALHE DA FILA ---
 else:
     fila_atual = st.session_state.fila_selecionada
-    st.subheader(f"📑 Extrato Detalhado: {fila_atual}")
-    
+    st.subheader(f"Visão Detalhada: {fila_atual}")
     df_extrato = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
     
-    # Opção para exportar para Excel
+    # --- GRÁFICOS EXECUTIVOS NO DETALHE ---
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        # Gráfico por Subfila/Carteira (se for Corporativo) ou Usuário
+        label_grf1 = 'Casos OA por Usuário'
+        if fila_atual == 'CORPORATIVO': label_grf1 = 'Casos OA por Carteira'
+        
+        # Agrupa e ordena para um gráfico limpo
+        df_grp = df_extrato['Subfila'].value_counts().reset_index()
+        fig_grp = px.bar(df_grp, x='count', y='Subfila', orientation='h', title=label_grf1, labels={'count': 'Volume'})
+        fig_grp.update_layout(height=350, yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_grp, use_container_width=True)
+        
+    with col_chart2:
+        # Gráfico de SLA
+        df_sla = df_extrato['SLA Atrasado'].value_counts().reset_index()
+        fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Distribuição do SLA (Total)', color='SLA Atrasado',
+                         color_discrete_map={'Não':'#00CC96', 'Sim':'#EF553B'})
+        fig_sla.update_layout(height=350)
+        st.plotly_chart(fig_sla, use_container_width=True)
+
+    # --- EXTRATO E EXCEL ---
+    st.markdown("---")
     def to_excel(df_export):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_export.to_excel(writer, index=False, sheet_name='Extrato')
-        processed_data = output.getvalue()
-        return processed_data
+            df_export.to_excel(writer, index=False, sheet_name='ExtratoOA')
+        return output.getvalue()
 
-    excel_data = to_excel(df_extrato)
+    # O download button já exporta o DataFrame FILTRADO da visão atual
     st.download_button(
-        label="📥 Baixar Extrato em Excel",
-        data=excel_data,
+        label="📥 Baixar Extrato da Fila em Excel",
+        data=to_excel(df_extrato),
         file_name=f'extrato_{fila_atual.replace(" ", "_").lower()}.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         type="primary"
     )
     
-    # Renderizando a tabela com link clicável nativo do Streamlit
+    # Tabela com Link Salesforce clicável
     st.dataframe(
         df_extrato,
         column_config={
-            "Link Salesforce": st.column_config.LinkColumn(
-                "Acessar Caso", display_text="Abrir no Salesforce"
-            ),
-            "ID do Caso": None # Esconde o ID feio da visualização
+            "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
+            "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
+            "ID do Caso": None # Esconde o ID
         },
         use_container_width=True,
         hide_index=True
