@@ -8,112 +8,34 @@ import plotly.express as px
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos OA", layout="wide", initial_sidebar_state="expanded")
 
-# --- CSS CUSTOMIZADO (REPLICAÇÃO EXATA DA REFERÊNCIA) ---
-# Aqui construímos o design dos cards, sombras, bordas superiores azuis e tipografia.
+# --- CSS CUSTOMIZADO GERAL ---
 st.markdown("""
     <style>
-    /* Estilo do Título Executivo */
-    h1 {
-        font-size: 26px !important;
-        font-family: 'IBM Plex Sans', sans-serif !important;
-        color: #1c2b39;
-        margin-bottom: -15px !important;
+    /* Ajustes de fundo e fontes gerais */
+    .stApp {
+        background-color: #f4f6f9;
     }
-    h2, h3 {
-        font-family: 'IBM Plex Sans', sans-serif !important;
-        color: #1c2b39;
+    h1, h2, h3 {
+        color: #1a2935;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
-
-    /* Container para alinhar os cards horizontalmente */
-    .kpi-row-container {
-        display: flex;
-        flex-direction: row;
-        justify-content: space-around;
-        gap: 10px;
-        width: 100%;
-        margin-bottom: 20px;
-    }
-
-    /* O Card de KPI Principal - Baseado na imagem de referência */
-    .kpi-card {
-        background-color: #ffffff;
-        border-radius: 8px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.06); /* Sombra sutil */
-        border-top: 6px solid #0056b3; /* Borda superior azul */
-        padding: 20px;
-        flex: 1; /* Todos os cards com o mesmo tamanho */
-        text-align: center;
-        min-width: 160px;
-    }
-    
-    /* Card Especial para Alerta de SLA Atrasado (Vermelho) */
-    .kpi-card-alert {
-        background-color: #ffffff;
-        border-radius: 8px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.06);
-        border-top: 6px solid #d9534f; /* Borda superior vermelha */
-        padding: 20px;
-        flex: 1;
-        text-align: center;
-        min-width: 160px;
-    }
-
-    /* Rótulo superior do Card (Texto Cinza, Centrado, Uppercase) */
-    .kpi-label {
-        font-family: 'IBM Plex Sans', sans-serif;
-        color: #727b84;
-        font-size: 13px;
-        text-transform: uppercase;
-        letter-spacing: 0.8px;
-        margin-bottom: 8px;
-    }
-
-    /* Valor principal do Card (Texto Azul Grande, Bold) */
-    .kpi-value {
-        font-family: 'IBM Plex Sans', sans-serif;
-        color: #0056b3;
-        font-size: 34px;
-        font-weight: 700;
-        margin-bottom: 0px;
-    }
-    
-    /* Valor principal Especial para Alerta (Vermelho) */
-    .kpi-value-alert {
-        font-family: 'IBM Plex Sans', sans-serif;
-        color: #d9534f;
-        font-size: 34px;
-        font-weight: 700;
-        margin-bottom: 0px;
-    }
-    
-    /* Rótulo da Fila Acima dos Cards */
-    .queue-title {
-        margin-top: 30px;
-        margin-bottom: 5px;
-        border-bottom: 2px solid #eaeaea;
-        padding-bottom: 5px;
-    }
-
-    /* Botão Detalhar discreto abaixo dos cards */
+    /* Botão de detalhar mais limpo e próximo aos cards */
     .stButton>button {
         width: 100%;
+        background-color: transparent;
+        border: 1px solid #c8d1d8;
+        color: #1a2935;
+        font-weight: 600;
         border-radius: 6px;
-        border: 1px solid #dcdcdc;
-        background-color: #ffffff;
-        color: #6c757d;
-        font-size: 14px;
-        margin-top: 5px;
+        transition: all 0.2s;
     }
     .stButton>button:hover {
-        border-color: #0c1c2b;
-        color: #0c1c2b;
-        background-color: #fcfcfc;
+        border-color: #0056b3;
+        color: #0056b3;
+        background-color: #f0f7ff;
     }
-    
-    /* Sidebar visual executivo */
-    .st-emotion-cache-1vt4y43 {
-        color: #0c1c2b !important;
-    }
+    /* Esconde o sumário da tabela nativa */
+    .stDataFrame { margin-top: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -135,7 +57,7 @@ def init_connection():
 
 sf = init_connection()
 
-# --- FUNÇÃO DE BUSCA OTIMIZADA (Conversa com o BD) ---
+# --- FUNÇÃO DE BUSCA OTIMIZADA ---
 @st.cache_data(ttl=1800) 
 def get_data(periodo_selecionado, incluir_fechados):
     mapa_periodos = {
@@ -161,13 +83,17 @@ def get_data(periodo_selecionado, incluir_fechados):
       {filtro_status}
     """
     result = sf.query_all(query)
-    # URL BASE CORRIGIDA
     sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
     
     linhas = []
     for record in result['records']:
         dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
-        filas_conhecidas = ["ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF"]
+        
+        # --- FILAS CONHECIDAS ATUALIZADA (INCLUI FINANCEIRO) ---
+        filas_conhecidas = [
+            "ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
+            "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO"
+        ]
         
         if dono_upper in filas_conhecidas:
             fila_principal = dono_upper
@@ -198,23 +124,59 @@ def get_data(periodo_selecionado, incluir_fechados):
         
     return pd.DataFrame(linhas)
 
-# --- FUNÇÃO AUXILIAR PARA GERAR O HTML DO CARD (O PONTO CHAVE) ---
-def render_kpi_card(label, value, alert=False):
-    """Gera o HTML para um card KPI único seguindo a imagem de referência."""
-    card_class = "kpi-card" if not alert else "kpi-card-alert"
-    value_class = "kpi-value" if not alert else "kpi-value-alert"
+# --- GERADOR VISUAL DE CARDS (Design Fiel à Imagem) ---
+def render_kpi_row(metricas):
+    """Gera o HTML flexbox alinhado idêntico à imagem de referência."""
+    html_cards = '<div style="display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">'
     
-    html = f"""
-    <div class="{card_class}">
-        <div class="kpi-label">{label}</div>
-        <div class="{value_class}">{value}</div>
-    </div>
-    """
-    return html
+    for metrica in metricas:
+        label = metrica['label']
+        valor = metrica['valor']
+        is_alert = metrica.get('alert', False)
+        
+        # Definição de cores (Azul Padrão vs Vermelho Alerta)
+        cor_borda_topo = "#d9534f" if is_alert else "#0056b3"
+        cor_valor = "#d9534f" if is_alert else "#0056b3"
+        
+        card = f"""
+        <div style="
+            background-color: #ffffff;
+            border: 1px solid #e0e4e8;
+            border-top: 4px solid {cor_borda_topo};
+            border-radius: 6px;
+            padding: 16px 10px;
+            flex: 1;
+            min-width: 130px;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        ">
+            <div style="
+                color: #6a747f;
+                font-size: 11px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                margin-bottom: 8px;
+            ">{label}</div>
+            <div style="
+                color: {cor_valor};
+                font-size: 28px;
+                font-weight: 700;
+                line-height: 1;
+            ">{valor}</div>
+        </div>
+        """
+        html_cards += card
+        
+    html_cards += '</div>'
+    return html_cards
 
-# --- BARRA LATERAL (SIDEBAR) CONTROLES DE BUSCA ---
-st.sidebar.title("Filtros de Busca")
-st.sidebar.markdown(f"Última Atualização: `{st.session_state.last_update}`")
+# --- BARRA LATERAL (SIDEBAR) ---
+st.sidebar.title("Filtros")
+st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
 if st.sidebar.button("🔄 Sincronizar Agora", type="primary"):
     st.cache_data.clear()
@@ -222,33 +184,26 @@ if st.sidebar.button("🔄 Sincronizar Agora", type="primary"):
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Ajuste os dados que deseja carregar:**")
-
-periodo_selecionado = st.sidebar.selectbox(
-    "Período de Abertura", 
-    ["Últimos 30 Dias", "Últimos 60 Dias", "Últimos 90 Dias", "Este Ano"],
-    index=0
-)
+periodo_selecionado = st.sidebar.selectbox("Período de Abertura", ["Últimos 30 Dias", "Últimos 60 Dias", "Últimos 90 Dias", "Este Ano"], index=0)
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 
 df_filtrado = get_data(periodo_selecionado, incluir_fechados)
 
 # --- TELA PRINCIPAL ---
-st.title("Visão de Casos OA")
-st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("<h1 style='font-size: 28px; margin-bottom: 10px;'>Visão de Casos OA</h1>", unsafe_allow_html=True)
 
-if st.button("⬅️ Voltar para Visão Geral", disabled=(st.session_state.fila_selecionada is None), type="secondary"):
+if st.button("⬅️ Voltar para Visão Geral", disabled=(st.session_state.fila_selecionada is None)):
     st.session_state.fila_selecionada = None
     st.rerun()
+
+st.markdown("<hr style='margin-top: 5px; margin-bottom: 20px; border-top: 1px solid #dce1e6;'>", unsafe_allow_html=True)
 
 # --- VISÃO 1: CARDS GERAIS ---
 if st.session_state.fila_selecionada is None:
     if df_filtrado.empty:
         st.info("Nenhum caso encontrado para os filtros selecionados.")
     else:
-        st.subheader("Resumo Executivo por Fila")
-        
-        filas_principais = df_filtrado['Fila Principal'].unique()
+        filas_principais = sorted(df_filtrado['Fila Principal'].unique())
         
         for fila in filas_principais:
             df_fila = df_filtrado[df_filtrado['Fila Principal'] == fila]
@@ -258,51 +213,45 @@ if st.session_state.fila_selecionada is None:
             fechados = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
             atrasados = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
             
-            # Cabeçalho da Fila
-            st.markdown(f"<h3 class='queue-title'>{fila}</h3>", unsafe_allow_html=True)
+            # Título da Fila Discreto
+            st.markdown(f"<h3 style='font-size: 18px; margin-bottom: 10px; color: #2c3e50;'>{fila}</h3>", unsafe_allow_html=True)
             
-            # --- CONSTRUÇÃO DA LINHA DE CARDS USANDO HTML ---
-            # Aqui juntamos os 4 cards numa mesma linha horizontal.
-            cards_html = f"""
-            <div class="kpi-row-container">
-                {render_kpi_card("Volume Total", vol_total)}
-                {render_kpi_card("Em Tratativa", em_tratativa)}
-                {render_kpi_card("Fechados", fechados)}
-                {render_kpi_card("SLA Atrasado (Ativos)", atrasados, alert=(atrasados > 0))}
-            </div>
-            """
-            st.markdown(cards_html, unsafe_allow_html=True)
+            # Renderiza a linha de cards
+            metricas = [
+                {'label': 'Volume Total', 'valor': vol_total},
+                {'label': 'Em Tratativa', 'valor': em_tratativa},
+                {'label': 'Fechados', 'valor': fechados},
+                {'label': 'SLA Atrasado', 'valor': atrasados, 'alert': atrasados > 0}
+            ]
+            st.markdown(render_kpi_row(metricas), unsafe_allow_html=True)
             
-            # Botão Detalhar discreto abaixo dos cards (mantendo funcionalidade Streamlit)
-            if st.button("🔍 Detalhar", key=f"btn_{fila}"):
+            # Botão detalhar encostado nos cards
+            if st.button(f"Detalhar Fila: {fila}", key=f"btn_{fila}"):
                 st.session_state.fila_selecionada = fila
                 st.rerun()
-            
-            st.markdown("<br>", unsafe_allow_html=True) # Espaçamento
+                
+            st.markdown("<br>", unsafe_allow_html=True)
 
-# --- VISÃO 2: DETALHE DA FILA (Inalterada, pois já estava executiva) ---
+# --- VISÃO 2: DETALHE DA FILA ---
 else:
     fila_atual = st.session_state.fila_selecionada
-    st.subheader(f"Visão Detalhada: {fila_atual}")
+    st.markdown(f"<h3 style='font-size: 22px;'>Fila: {fila_atual}</h3>", unsafe_allow_html=True)
     df_extrato = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
     
     col_chart1, col_chart2 = st.columns(2)
-    
     with col_chart1:
         label_grf1 = 'Casos OA por Usuário' if fila_atual != 'CORPORATIVO' else 'Casos OA por Carteira'
         df_grp = df_extrato['Subfila'].value_counts().reset_index()
-        fig_grp = px.bar(df_grp, x='count', y='Subfila', orientation='h', title=label_grf1, labels={'count': 'Volume'})
-        fig_grp.update_layout(height=350, yaxis={'categoryorder':'total ascending'})
+        fig_grp = px.bar(df_grp, x='count', y='Subfila', orientation='h', title=label_grf1, labels={'count': 'Volume', 'Subfila': ''})
+        fig_grp.update_layout(height=320, margin=dict(l=0, r=0, t=40, b=0), yaxis={'categoryorder':'total ascending'}, plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_grp, use_container_width=True)
         
     with col_chart2:
         df_sla = df_extrato['SLA Atrasado'].value_counts().reset_index()
-        fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Distribuição do SLA (Total)', color='SLA Atrasado',
-                         color_discrete_map={'Não':'#00CC96', 'Sim':'#EF553B'})
-        fig_sla.update_layout(height=350)
+        fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.6, title='Saúde do SLA (Total)', color='SLA Atrasado', color_discrete_map={'Não':'#0056b3', 'Sim':'#d9534f'})
+        fig_sla.update_layout(height=320, margin=dict(l=0, r=0, t=40, b=0))
         st.plotly_chart(fig_sla, use_container_width=True)
 
-    st.markdown("---")
     def to_excel(df_export):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -310,7 +259,7 @@ else:
         return output.getvalue()
 
     st.download_button(
-        label="📥 Baixar Extrato da Fila em Excel",
+        label="📥 Baixar Extrato em Excel",
         data=to_excel(df_extrato),
         file_name=f'extrato_{fila_atual.replace(" ", "_").lower()}.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -322,7 +271,6 @@ else:
         column_config={
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
-            # CONFIGURAÇÃO CORRIGIDA PARA ESCONDER O ID FEIO
             "ID do Caso": None
         },
         use_container_width=True,
