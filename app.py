@@ -11,15 +11,8 @@ st.set_page_config(page_title="Gestão de Casos OA", layout="wide", initial_side
 # --- CSS CUSTOMIZADO GERAL ---
 st.markdown("""
     <style>
-    /* Ajustes de fundo e fontes gerais */
-    .stApp {
-        background-color: #f4f6f9;
-    }
-    h1, h2, h3 {
-        color: #1a2935;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    /* Botão de detalhar mais limpo e próximo aos cards */
+    .stApp { background-color: #f4f6f9; }
+    h1, h2, h3 { color: #1a2935; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
     .stButton>button {
         width: 100%;
         background-color: transparent;
@@ -28,14 +21,13 @@ st.markdown("""
         font-weight: 600;
         border-radius: 6px;
         transition: all 0.2s;
+        margin-top: -10px;
     }
     .stButton>button:hover {
         border-color: #0056b3;
         color: #0056b3;
         background-color: #f0f7ff;
     }
-    /* Esconde o sumário da tabela nativa */
-    .stDataFrame { margin-top: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -89,7 +81,6 @@ def get_data(periodo_selecionado, incluir_fechados):
     for record in result['records']:
         dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
         
-        # --- FILAS CONHECIDAS ATUALIZADA (INCLUI FINANCEIRO) ---
         filas_conhecidas = [
             "ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
             "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO"
@@ -124,55 +115,27 @@ def get_data(periodo_selecionado, incluir_fechados):
         
     return pd.DataFrame(linhas)
 
-# --- GERADOR VISUAL DE CARDS (Design Fiel à Imagem) ---
+# --- CORREÇÃO DO GERADOR VISUAL DE CARDS ---
 def render_kpi_row(metricas):
-    """Gera o HTML flexbox alinhado idêntico à imagem de referência."""
-    html_cards = '<div style="display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">'
+    # Todo o código HTML colado na margem esquerda para o Streamlit não quebrar
+    html = '<div style="display: flex; justify-content: space-between; gap: 15px; margin-bottom: 20px; width: 100%;">'
     
     for metrica in metricas:
         label = metrica['label']
         valor = metrica['valor']
         is_alert = metrica.get('alert', False)
         
-        # Definição de cores (Azul Padrão vs Vermelho Alerta)
-        cor_borda_topo = "#d9534f" if is_alert else "#0056b3"
-        cor_valor = "#d9534f" if is_alert else "#0056b3"
+        cor_borda = "#d9534f" if is_alert else "#0056b3"
+        cor_texto = "#d9534f" if is_alert else "#0056b3"
         
-        card = f"""
-        <div style="
-            background-color: #ffffff;
-            border: 1px solid #e0e4e8;
-            border-top: 4px solid {cor_borda_topo};
-            border-radius: 6px;
-            padding: 16px 10px;
-            flex: 1;
-            min-width: 130px;
-            text-align: center;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-        ">
-            <div style="
-                color: #6a747f;
-                font-size: 11px;
-                font-weight: 700;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-                margin-bottom: 8px;
-            ">{label}</div>
-            <div style="
-                color: {cor_valor};
-                font-size: 28px;
-                font-weight: 700;
-                line-height: 1;
-            ">{valor}</div>
-        </div>
-        """
-        html_cards += card
-        
-    html_cards += '</div>'
-    return html_cards
+        html += f'''
+<div style="background-color: #ffffff; border: 1px solid #e0e0e0; border-top: 4px solid {cor_borda}; border-radius: 8px; padding: 20px 10px; flex: 1; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.02);">
+<div style="color: #6a747f; font-size: 12px; font-weight: 700; text-transform: uppercase; margin-bottom: 8px;">{label}</div>
+<div style="color: {cor_texto}; font-size: 32px; font-weight: 700;">{valor}</div>
+</div>
+'''
+    html += '</div>'
+    return html
 
 # --- BARRA LATERAL (SIDEBAR) ---
 st.sidebar.title("Filtros")
@@ -213,20 +176,19 @@ if st.session_state.fila_selecionada is None:
             fechados = len(df_fila[df_fila['Macro Status'] == 'Fechado'])
             atrasados = len(df_fila[(df_fila['SLA Atrasado'] == 'Sim') & (df_fila['Macro Status'] == 'Em Tratativa')])
             
-            # Título da Fila Discreto
-            st.markdown(f"<h3 style='font-size: 18px; margin-bottom: 10px; color: #2c3e50;'>{fila}</h3>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='font-size: 18px; margin-bottom: 15px; color: #2c3e50;'>Fila: {fila}</h3>", unsafe_allow_html=True)
             
-            # Renderiza a linha de cards
+            # --- RENDERIZA OS CARDS ---
             metricas = [
                 {'label': 'Volume Total', 'valor': vol_total},
                 {'label': 'Em Tratativa', 'valor': em_tratativa},
                 {'label': 'Fechados', 'valor': fechados},
-                {'label': 'SLA Atrasado', 'valor': atrasados, 'alert': atrasados > 0}
+                {'label': 'SLA Atrasado (Ativos)', 'valor': atrasados, 'alert': atrasados > 0}
             ]
             st.markdown(render_kpi_row(metricas), unsafe_allow_html=True)
             
-            # Botão detalhar encostado nos cards
-            if st.button(f"Detalhar Fila: {fila}", key=f"btn_{fila}"):
+            # --- BOTÃO DETALHAR ---
+            if st.button(f"🔍 Detalhar Fila {fila}", key=f"btn_{fila}"):
                 st.session_state.fila_selecionada = fila
                 st.rerun()
                 
