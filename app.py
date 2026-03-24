@@ -133,7 +133,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             'Conta': record['Account']['Name'] if record['Account'] else '-'
         })
         
-    return pd.DataFrame(linhas)
+    df_final = pd.DataFrame(linhas)
+    
+    # TRAVA DE SEGURANÇA: Força as colunas a serem sempre do tipo Data
+    if not df_final.empty:
+        df_final['Abertura'] = pd.to_datetime(df_final['Abertura'])
+        df_final['Fechamento'] = pd.to_datetime(df_final['Fechamento'])
+        
+    return df_final
 
 # --- FUNÇÃO PARA DESENHAR O CARD QUADRADO ---
 def desenhar_card(fila_nome, df_fila):
@@ -212,7 +219,6 @@ if df_filtrado.empty:
     st.info("Nenhum caso encontrado para os filtros selecionados.")
     
 elif st.session_state.fila_selecionada is None:
-    # VISÃO 1: GRID DE CARDS QUADRADOS
     st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
     
     cols = st.columns(4)
@@ -251,7 +257,7 @@ else:
         if cart_sel != "Todas":
             df_view = df_view[df_view['Subfila'] == cart_sel]
             
-    # --- NOVOS KPIS SUPERIORES (COM TMA) ---
+    # --- KPIS SUPERIORES ---
     vol = len(df_view)
     trat = len(df_view[df_view['Macro Status'] == 'Em Tratativa'])
     fech = len(df_view[df_view['Macro Status'] == 'Fechado'])
@@ -285,22 +291,25 @@ else:
     """
     st.markdown(html_kpi_detalhe, unsafe_allow_html=True)
 
-    # --- NOVO GRÁFICO TENDÊNCIA ABERTOS VS FECHADOS ---
+    # --- GRÁFICO TENDÊNCIA ABERTOS VS FECHADOS ---
     st.markdown("#### Tendência Operacional")
+    
+    # Prepara dados de Abertura
     df_trend_abertos = df_view[df_view['Abertura'].notna()].copy()
-    df_trend_abertos['Data'] = df_trend_abertos['Abertura'].dt.date
-    s_abertos = df_trend_abertos.groupby('Data').size().rename('Abertos')
+    s_abertos = df_trend_abertos['Abertura'].dt.date.value_counts().rename('Abertos')
 
+    # Prepara dados de Fechamento (protegido contra Nulo)
     df_trend_fechados = df_view[df_view['Fechamento'].notna()].copy()
-    df_trend_fechados['Data'] = df_trend_fechados['Fechamento'].dt.date
-    s_fechados = df_trend_fechados.groupby('Data').size().rename('Fechados')
+    s_fechados = df_trend_fechados['Fechamento'].dt.date.value_counts().rename('Fechados')
 
+    # Junta e Plota
     df_trend = pd.concat([s_abertos, s_fechados], axis=1).fillna(0).reset_index()
+    df_trend.rename(columns={'index': 'Data'}, inplace=True)
     df_trend = df_trend.sort_values('Data')
 
     if not df_trend.empty:
         fig_trend = px.line(df_trend, x='Data', y=['Abertos', 'Fechados'], 
-                            labels={'value': 'Volume', 'Data': 'Data', 'variable': 'Métrica'},
+                            labels={'value': 'Volume', 'Data': 'Data', 'variable': 'Status'},
                             color_discrete_map={'Abertos': '#EF553B', 'Fechados': '#00CC96'})
         fig_trend.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), plot_bgcolor='rgba(0,0,0,0)', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         st.plotly_chart(fig_trend, use_container_width=True)
@@ -353,12 +362,11 @@ else:
     with col_aviso:
         st.caption("💡 **Dica:** Passe o rato sobre o cabeçalho de qualquer coluna abaixo e clique no ícone da lupa para aplicar filtros.")
     
-    # --- FORMATAÇÃO CONDICIONAL DA TABELA (Cor Vermelha nos Atrasos) ---
+    # --- FORMATAÇÃO CONDICIONAL DA TABELA ---
     def colorir_linha(row):
         cor = '#ffebee' if row['SLA Atrasado'] == 'Atrasado' else '#ffffff'
         return [f'background-color: {cor}' for _ in row]
 
-    # Aplica o estilo. Ocultei o índice para a visualização ficar mais limpa
     df_estilizado = df_view.style.apply(colorir_linha, axis=1).hide(axis="index")
 
     st.dataframe(
