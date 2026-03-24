@@ -19,6 +19,7 @@ st.markdown("""
     
     h1 { font-size: 24px !important; margin-bottom: 20px !important; color: #1a2935; }
     
+    /* Botões dos Cards (Visão Geral) */
     .stButton>button {
         border-radius: 0px 0px 8px 8px !important;
         border-top: none !important;
@@ -33,12 +34,22 @@ st.markdown("""
         color: white !important;
     }
     
-    .btn-voltar>button {
+    /* CORREÇÃO: Botão de Sincronizar (Barra Lateral) Centralizado */
+    [data-testid="stSidebar"] div.stButton {
+        display: flex;
+        justify-content: center;
+        width: 100%;
+    }
+    [data-testid="stSidebar"] div.stButton > button {
+        width: 95% !important; /* Ocupa quase toda a barra, mantendo margem */
         border-radius: 6px !important;
         background-color: #0056b3 !important;
         color: white !important;
-        margin-top: 0px !important;
-        width: 250px !important;
+        margin-top: 10px !important;
+        border: none !important;
+    }
+    [data-testid="stSidebar"] div.stButton > button:hover {
+        background-color: #004494 !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -170,7 +181,6 @@ def desenhar_card(fila_nome, df_fila):
         st.rerun()
 
 # --- MENU LATERAL (SIDEBAR) ---
-# Tenta carregar a logo atualizada (.png). 
 try:
     st.sidebar.image("Salesforce.png", use_container_width=True)
 except Exception:
@@ -178,8 +188,8 @@ except Exception:
 
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
-# Botão de Sincronizar (atualiza a hora e limpa o cache)
-if st.sidebar.button("🔄 Sincronizar Agora", type="primary"):
+# Botão de Sincronizar com formatação corrigida pelo CSS
+if st.sidebar.button("🔄 Sincronizar Agora", type="primary", use_container_width=True):
     st.cache_data.clear()
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
     st.rerun()
@@ -215,7 +225,7 @@ if df_filtrado.empty:
     st.info("Nenhum caso encontrado para os filtros selecionados.")
     
 elif st.session_state.fila_selecionada is None:
-    # VISÃO 1: GRID DE CARDS QUADRADOS (TÍTULO ATUALIZADO)
+    # VISÃO 1: GRID DE CARDS QUADRADOS
     st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
     
     cols = st.columns(4)
@@ -229,10 +239,28 @@ else:
     # VISÃO 2: TELA DE DETALHES
     fila_atual = st.session_state.fila_selecionada
     
-    st.markdown('<div class="btn-voltar">', unsafe_allow_html=True)
+    # Botão de voltar com inline style para garantir a cor e o tamanho mesmo com o CSS global
+    st.markdown("""
+        <style>
+        .btn-voltar-container .stButton>button {
+            border-radius: 6px !important;
+            background-color: #0056b3 !important;
+            color: white !important;
+            margin-top: 0px !important;
+            width: 280px !important;
+            border: none !important;
+        }
+        .btn-voltar-container .stButton>button:hover {
+            background-color: #004494 !important;
+        }
+        </style>
+        <div class="btn-voltar-container">
+    """, unsafe_allow_html=True)
+    
     if st.button("⬅️ Voltar para a Grade Principal"):
         st.session_state.fila_selecionada = None
         st.rerun()
+        
     st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Fila: {fila_atual}</h2>", unsafe_allow_html=True)
@@ -252,7 +280,6 @@ else:
     with c1:
         df_abertos = df_view[df_view['Macro Status'] == 'Em Tratativa'].copy()
         if not df_abertos.empty:
-            # Pega o horário atual (em UTC limpo) para comparar corretamente com o horário que veio do Salesforce (que é UTC convertido para base limpa)
             df_abertos['Idade'] = (datetime.now(timezone.utc).replace(tzinfo=None) - df_abertos['Abertura']).dt.days
             bins = [-1, 3, 7, 10000]
             labels = ['0 a 3 Dias', '4 a 7 Dias', '+7 Dias']
