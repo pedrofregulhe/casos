@@ -11,7 +11,6 @@ st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar
 # --- CSS CUSTOMIZADO (FUNDO BRANCO E LIMPEZA) ---
 st.markdown("""
     <style>
-    /* Fundo 100% Branco */
     .stApp { background-color: #ffffff !important; }
     header { visibility: hidden !important; height: 0px !important; display: none !important; }
     #MainMenu { visibility: hidden !important; display: none !important; }
@@ -20,7 +19,6 @@ st.markdown("""
     
     h1 { font-size: 24px !important; margin-bottom: 20px !important; color: #1a2935; }
     
-    /* Ajuste dos botões dos cards */
     .stButton>button {
         border-radius: 0px 0px 8px 8px !important;
         border-top: none !important;
@@ -35,7 +33,6 @@ st.markdown("""
         color: white !important;
     }
     
-    /* Botão de Voltar */
     .btn-voltar>button {
         border-radius: 6px !important;
         background-color: #0056b3 !important;
@@ -84,9 +81,10 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # QUERY ATUALIZADA: Inclusão do ClosedDate
     query = f"""
     SELECT 
-        Id, CaseNumber, CreatedDate, Status,
+        Id, CaseNumber, CreatedDate, ClosedDate, Status,
         Account.Name, Account.FOZ_CPF__c,
         Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones)
@@ -119,16 +117,20 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             
         macro_status = "Fechado" if record['Status'] in ['Closed', 'Fechado'] else "Em Tratativa"
         sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
-                    
+        
+        # Tratamento da Data de Fechamento (Evita erro se estiver nulo)
+        data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
+        
         linhas.append({
             'ID do Caso': record['Id'],
             'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
             'Número': record['CaseNumber'],
             'Abertura': pd.to_datetime(record['CreatedDate']).tz_localize(None),
+            'Fechamento': data_fechamento,
             'Fila Principal': fila_principal,
             'Subfila': subfila,
             'Origem': record['Origin'],
-            'Tipo Salesforce': record['Type'] if record['Type'] else 'Sem Tipo',
+            'Tipo Salesforce': record['Type'] if record['Type'] else 'E-mail', # Ajuste de regra do E-mail
             'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
             'Motivo': record['FOZ_Motivo__c'],
             'Detalhe': record['FOZ_Detalhe__c'],
@@ -167,7 +169,12 @@ def desenhar_card(fila_nome, df_fila):
         st.rerun()
 
 # --- MENU LATERAL (SIDEBAR) ---
-st.sidebar.title("Filtros")
+# Tenta carregar a imagem. Se a imagem não for encontrada, ele ignora sem quebrar o site.
+try:
+    st.sidebar.image("Salesforce.jfif", use_container_width=True)
+except Exception:
+    st.sidebar.markdown("<h2>Filtros</h2>", unsafe_allow_html=True)
+
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
 if st.sidebar.button("🔄 Sincronizar Agora", type="primary"):
@@ -202,11 +209,11 @@ else:
 
 # --- RENDERIZAÇÃO DA TELA PRINCIPAL ---
 if df_filtrado.empty:
-    st.markdown("<h1>Visão Operacional - Casos OA</h1>", unsafe_allow_html=True)
+    st.markdown("<h1>Visão Operacional - Casos</h1>", unsafe_allow_html=True)
     st.info("Nenhum caso encontrado para os filtros selecionados.")
     
 elif st.session_state.fila_selecionada is None:
-    # VISÃO 1: GRID DE CARDS QUADRADOS (TELA CHEIA)
+    # VISÃO 1: GRID DE CARDS QUADRADOS
     st.markdown("<h1>Visão Operacional - Escolha uma Fila</h1>", unsafe_allow_html=True)
     
     cols = st.columns(4)
@@ -217,10 +224,9 @@ elif st.session_state.fila_selecionada is None:
             st.markdown("<br>", unsafe_allow_html=True)
 
 else:
-    # VISÃO 2: TELA DE DETALHES (TELA CHEIA)
+    # VISÃO 2: TELA DE DETALHES
     fila_atual = st.session_state.fila_selecionada
     
-    # Botão de voltar isolado no topo
     st.markdown('<div class="btn-voltar">', unsafe_allow_html=True)
     if st.button("⬅️ Voltar para a Grade Principal"):
         st.session_state.fila_selecionada = None
@@ -230,7 +236,6 @@ else:
     st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Fila: {fila_atual}</h2>", unsafe_allow_html=True)
     df_view = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
     
-    # Filtro de Carteira Corporativa
     if fila_atual == "CORPORATIVO":
         carteiras_disp = sorted(df_view['Subfila'].unique().tolist())
         col_f, _ = st.columns([1, 3])
@@ -239,11 +244,10 @@ else:
         if cart_sel != "Todas":
             df_view = df_view[df_view['Subfila'] == cart_sel]
             
-    # Gráficos Executivos (TELA CHEIA DIVIDIDA AO MEIO)
+    # Gráficos Executivos
     c1, c2 = st.columns(2, gap="large")
     
     with c1:
-        # Gráfico 1: Idade dos Casos (Mantido)
         df_abertos = df_view[df_view['Macro Status'] == 'Em Tratativa'].copy()
         if not df_abertos.empty:
             df_abertos['Idade'] = (datetime.now() - df_abertos['Abertura']).dt.days
@@ -261,7 +265,6 @@ else:
             st.info("Nenhum caso em aberto no momento.")
             
     with c2:
-        # Gráfico 2: NOVO GRÁFICO DE PIZZA DE SLA
         df_sla = df_view['SLA Atrasado'].value_counts().reset_index()
         fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Saúde do SLA (Total)', 
                          color='SLA Atrasado', color_discrete_map={'No Prazo':'#00CC96', 'Atrasado':'#EF553B'})
@@ -270,12 +273,15 @@ else:
 
     st.markdown("---")
     
-    # Download e Tabela (COM FILTROS NATIVOS)
     col_dl, col_aviso = st.columns([1, 3])
     with col_dl:
         def to_excel(df_export):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Remove o timezone antes de exportar para evitar erros no Excel
+                df_export['Abertura'] = df_export['Abertura'].dt.tz_localize(None)
+                if df_export['Fechamento'].notna().any():
+                    df_export['Fechamento'] = df_export['Fechamento'].dt.tz_localize(None)
                 df_export.to_excel(writer, index=False, sheet_name='Extrato')
             return output.getvalue()
 
@@ -286,13 +292,15 @@ else:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     with col_aviso:
-        st.caption("💡 **Dica:** Passe o mouse sobre o cabeçalho de qualquer coluna abaixo (ex: Motivo) e clique no ícone da lupa para aplicar filtros específicos.")
+        st.caption("💡 **Dica:** Passe o mouse sobre o cabeçalho de qualquer coluna abaixo e clique no ícone da lupa para aplicar filtros.")
     
+    # Atualização para incluir a formatação da coluna de Fechamento
     st.dataframe(
         df_view,
         column_config={
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
-            "Abertura": st.column_config.DateColumn("Abertura", format="DD/MM/YYYY"),
+            "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
+            "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
             "ID do Caso": None
         },
         use_container_width=True,
