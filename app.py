@@ -56,7 +56,26 @@ def init_connection():
 
 sf = init_connection()
 
-# --- FUNÇÃO DE BUSCA OTIMIZADA ---
+# --- FUNÇÕES DE BUSCA (DADOS E PROPRIETÁRIOS) ---
+
+# Nova função: Puxa todos os usuários e filas para o Dropdown
+@st.cache_data(ttl=3600) # Atualiza a lista de usuários a cada 1 hora
+def get_owner_options():
+    sf_conn = init_connection()
+    # Puxa usuários ativos
+    users = sf_conn.query_all("SELECT Id, Name FROM User WHERE IsActive = TRUE")
+    # Puxa Filas
+    queues = sf_conn.query_all("SELECT Id, Name FROM Group WHERE Type = 'Queue'")
+    
+    opcoes = {}
+    for q in queues['records']:
+        opcoes[f"📁 {q['Name']}"] = q['Id']
+    for u in users['records']:
+        opcoes[f"👤 {u['Name']}"] = u['Id']
+        
+    # Retorna o dicionário ordenado alfabeticamente
+    return dict(sorted(opcoes.items()))
+
 @st.cache_data(ttl=1800) 
 def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
     if periodo_selecionado == "Personalizado" and dt_inicio and dt_fim:
@@ -207,6 +226,7 @@ if periodo_selecionado == "Personalizado":
 
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados)
+lista_proprietarios = get_owner_options() # Carrega os donos para o dropdown
 
 # --- ORDENAÇÃO DAS FILAS ---
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
@@ -342,51 +362,36 @@ else:
         key=f"editor_{fila_atual}"
     )
     
-    # --- NOVO PAINEL DE TRANSFERÊNCIA COM BUSCA POR NOME ---
+    # --- NOVO PAINEL DE TRANSFERÊNCIA (DROPDOWN INTELIGENTE) ---
     casos_selecionados = edited_df[edited_df['Selecionar'] == True]
     if not casos_selecionados.empty:
         st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para transferência.**")
         
-        col_input, col_btn, _ = st.columns([2, 2, 4])
+        col_input, col_btn, _ = st.columns([3, 2, 3])
         with col_input:
-            novo_owner_nome = st.text_input("Nome do Novo Proprietário (Usuário ou Fila):", placeholder="Ex: CARTEIRA_L_01")
+            # Menu suspenso com todos os usuários e filas
+            nomes_proprietarios = [""] + list(lista_proprietarios.keys())
+            dono_selecionado = st.selectbox("Selecione o Novo Proprietário:", nomes_proprietarios)
+            
         with col_btn:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if st.button("🔄 Transferir Casos Selecionados", type="primary", use_container_width=True):
-                if novo_owner_nome:
-                    with st.spinner("Buscando proprietário e transferindo casos..."):
+            if st.button("🔄 Transferir Casos", type="primary", use_container_width=True):
+                if dono_selecionado:
+                    with st.spinner("Transferindo casos no Salesforce..."):
                         try:
-                            # Prevenção contra injeção de aspas
-                            nome_seguro = novo_owner_nome.replace("'", "\\'")
+                            # Pega o ID de 18 caracteres de forma invisível do dicionário
+                            novo_id = lista_proprietarios[dono_selecionado]
                             
-                            # 1. Tenta achar Usuário
-                            user_query = f"SELECT Id FROM User WHERE Name = '{nome_seguro}' LIMIT 1"
-                            user_res = sf.query(user_query)
+                            payload = [{'Id': row['ID do Caso'], 'OwnerId': novo_id} for _, row in casos_selecionados.iterrows()]
+                            sf.bulk.Case.update(payload)
                             
-                            novo_id = None
-                            if user_res['totalSize'] > 0:
-                                novo_id = user_res['records'][0]['Id']
-                            else:
-                                # 2. Tenta achar Fila (Group) se não for Usuário
-                                queue_query = f"SELECT Id FROM Group WHERE Type = 'Queue' AND Name = '{nome_seguro}' LIMIT 1"
-                                queue_res = sf.query(queue_query)
-                                if queue_res['totalSize'] > 0:
-                                    novo_id = queue_res['records'][0]['Id']
-                                    
-                            # Se achou um ID, faz o bulk update
-                            if novo_id:
-                                payload = [{'Id': row['ID do Caso'], 'OwnerId': novo_id} for _, row in casos_selecionados.iterrows()]
-                                sf.bulk.Case.update(payload)
-                                
-                                st.success(f"Sucesso! Os casos foram transferidos para {novo_owner_nome}.")
-                                st.cache_data.clear() 
-                                st.rerun() 
-                            else:
-                                st.error(f"Não encontramos nenhum Usuário ou Fila com o nome exato: '{novo_owner_nome}'. Verifique a ortografia.")
+                            st.success(f"Sucesso! Casos transferidos para {dono_selecionado}.")
+                            st.cache_data.clear() 
+                            st.rerun() 
                         except Exception as e:
                             st.error(f"Erro na integração com Salesforce: {e}")
                 else:
-                    st.warning("Por favor, digite o nome do novo proprietário.")
+                    st.warning("Por favor, selecione um proprietário na lista antes de transferir.")
 
     st.markdown("---")
 
