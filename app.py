@@ -63,9 +63,12 @@ def get_api_user_id():
     sf_conn = init_connection()
     try:
         username_api = st.secrets["sf_username"]
-        return sf_conn.query(f"SELECT Id FROM User WHERE Username = '{username_api}'")['records'][0]['Id']
-    except:
-        return None
+        res = sf_conn.query(f"SELECT Id FROM User WHERE Username = '{username_api}'")
+        if res['totalSize'] > 0:
+            return res['records'][0]['Id']
+    except Exception as e:
+        pass
+    return None
 
 @st.cache_data(ttl=3600, show_spinner="Atualizando lista de proprietários...") 
 def get_owner_options():
@@ -98,7 +101,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # QUERY MÁGICA: Agora puxamos a Descrição oficial e também o Primeiro Comentário
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
@@ -148,7 +150,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
             classificacao = record['Account']['FOZ_Classificacao__c']
             
-        # LÓGICA DE DESCRIÇÃO: Se não tiver a oficial, pega a do CaseComment
         desc_oficial = record.get('Description')
         comentario_inicial = ""
         if record.get('CaseComments') and record['CaseComments'].get('records'):
@@ -415,7 +416,7 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES ---
+        # --- SALVAR ALTERAÇÕES DA TABELA (DANÇA EM 3 PASSOS) ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
@@ -426,14 +427,16 @@ else:
                             id_caso = row['ID do Caso']
                             dono_original = row['ID do Proprietário']
                             
+                            # PASSO 1: Puxa o caso para o usuário da API (Burla a trava de edição)
                             if api_user_id and dono_original != api_user_id:
                                 sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
-                            payload_edicao = {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}
+                            # PASSO 2: Faz a edição (O Salesforce aceita porque somos o dono agora)
+                            sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                            
+                            # PASSO 3: Devolve o caso educadamente para o dono original
                             if api_user_id and dono_original != api_user_id:
-                                payload_edicao['OwnerId'] = dono_original
-                                
-                            sf.Case.update(id_caso, payload_edicao, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                             
                         st.success("Alterações salvas com sucesso!")
                         st.cache_data.clear()
@@ -443,7 +446,7 @@ else:
 
         st.markdown("---")
 
-        # --- TRANSFERÊNCIA E COMENTÁRIOS ---
+        # --- TRANSFERÊNCIA E COMENTÁRIOS (DANÇA EM 3 PASSOS) ---
         casos_selecionados = edited_df[edited_df['Selecionar'] == True]
         if not casos_selecionados.empty:
             st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para ações em massa:**")
@@ -464,11 +467,20 @@ else:
                             for _, row in casos_selecionados.iterrows():
                                 id_caso = row['ID do Caso']
                                 num_caso = row['Número']
+                                dono_original = row['ID do Proprietário']
+                                
                                 try:
-                                    if api_user_id:
+                                    # PASSO 1: Toma posse do caso para garantir direitos de edição
+                                    if api_user_id and dono_original != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    sf.Case.update(id_caso, {'OwnerId': novo_id, 'Status': 'Em Aberto'}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    # PASSO 2: Força o status 'Em Aberto' ANTES de transferir
+                                    sf.Case.update(id_caso, {'Status': 'Em Aberto'}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    
+                                    # PASSO 3: Transfere para o destino final (Só se o destino não for a própria API)
+                                    if novo_id != api_user_id:
+                                        sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                        
                                     sucessos += 1
                                 except Exception as e:
                                     msg_erro = str(e)
@@ -483,7 +495,7 @@ else:
                                 st.error(f"⚠️ O Salesforce bloqueou a transferência de {len(erros)} caso(s):")
                                 for err in erros: st.warning(err)
                             if sucessos > 0:
-                                st.success(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
+                                st.success(f"✅ {sucessos} caso(s) transferido(s) com sucesso para o status 'Em Aberto'!")
                             if sucessos > 0 or erros:
                                 import time
                                 time.sleep(4) 
