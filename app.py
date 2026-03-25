@@ -56,15 +56,11 @@ def init_connection():
 
 sf = init_connection()
 
-# --- FUNÇÕES DE BUSCA (DADOS E PROPRIETÁRIOS) ---
-
-# Nova função: Puxa todos os usuários e filas para o Dropdown
-@st.cache_data(ttl=3600) # Atualiza a lista de usuários a cada 1 hora
+# --- FUNÇÕES DE BUSCA ---
+@st.cache_data(ttl=3600) 
 def get_owner_options():
     sf_conn = init_connection()
-    # Puxa usuários ativos
     users = sf_conn.query_all("SELECT Id, Name FROM User WHERE IsActive = TRUE")
-    # Puxa Filas
     queues = sf_conn.query_all("SELECT Id, Name FROM Group WHERE Type = 'Queue'")
     
     opcoes = {}
@@ -73,7 +69,6 @@ def get_owner_options():
     for u in users['records']:
         opcoes[f"👤 {u['Name']}"] = u['Id']
         
-    # Retorna o dicionário ordenado alfabeticamente
     return dict(sorted(opcoes.items()))
 
 @st.cache_data(ttl=1800) 
@@ -226,7 +221,7 @@ if periodo_selecionado == "Personalizado":
 
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados)
-lista_proprietarios = get_owner_options() # Carrega os donos para o dropdown
+lista_proprietarios = get_owner_options()
 
 # --- ORDENAÇÃO DAS FILAS ---
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
@@ -315,9 +310,8 @@ else:
     """
     st.markdown(html_kpi_detalhe, unsafe_allow_html=True)
 
-    # --- 2. EXTRATO (TABELA, EXCEL E BULK UPDATE INTELIGENTE) ---
+    # --- 2. EXTRATO E AÇÕES EM MASSA ---
     st.markdown("#### Extrato e Ações em Massa")
-    
     df_view.insert(0, 'Selecionar', False)
     
     col_dl, col_aviso = st.columns([1, 3])
@@ -339,7 +333,7 @@ else:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     with col_aviso:
-        st.caption("💡 **Dica:** Marque a caixa 'Selecionar' nos casos que deseja transferir. Para filtros, use a lupa no cabeçalho das colunas.")
+        st.caption("💡 **Dica:** Marque a caixa 'Selecionar' nos casos que deseja transferir. Use a lupa nas colunas para aplicar filtros.")
     
     def colorir_linha(row):
         cor = '#ffebee' if row['SLA Atrasado'] == 'Atrasado' else '#ffffff'
@@ -362,14 +356,13 @@ else:
         key=f"editor_{fila_atual}"
     )
     
-    # --- NOVO PAINEL DE TRANSFERÊNCIA (DROPDOWN INTELIGENTE) ---
+    # --- NOVO PAINEL DE TRANSFERÊNCIA (DROPDOWN + AVISO DE ERRO) ---
     casos_selecionados = edited_df[edited_df['Selecionar'] == True]
     if not casos_selecionados.empty:
         st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para transferência.**")
         
         col_input, col_btn, _ = st.columns([3, 2, 3])
         with col_input:
-            # Menu suspenso com todos os usuários e filas
             nomes_proprietarios = [""] + list(lista_proprietarios.keys())
             dono_selecionado = st.selectbox("Selecione o Novo Proprietário:", nomes_proprietarios)
             
@@ -378,18 +371,41 @@ else:
             if st.button("🔄 Transferir Casos", type="primary", use_container_width=True):
                 if dono_selecionado:
                     with st.spinner("Transferindo casos no Salesforce..."):
-                        try:
-                            # Pega o ID de 18 caracteres de forma invisível do dicionário
-                            novo_id = lista_proprietarios[dono_selecionado]
+                        novo_id = lista_proprietarios[dono_selecionado]
+                        sucessos = 0
+                        erros = []
+                        
+                        # Atualização linha a linha para capturar erros detalhados
+                        for _, row in casos_selecionados.iterrows():
+                            id_caso = row['ID do Caso']
+                            num_caso = row['Número']
+                            try:
+                                sf.Case.update(id_caso, {'OwnerId': novo_id})
+                                sucessos += 1
+                            except Exception as e:
+                                msg_erro = str(e)
+                                try:
+                                    import json
+                                    erro_json = json.loads(e.content)[0]
+                                    msg_erro = erro_json.get('message', msg_erro)
+                                except:
+                                    pass
+                                erros.append(f"Caso {num_caso}: {msg_erro}")
+                        
+                        # Retorno visual para o usuário
+                        if erros:
+                            st.error(f"⚠️ O Salesforce bloqueou a transferência de {len(erros)} caso(s):")
+                            for err in erros:
+                                st.warning(err)
+                                
+                        if sucessos > 0:
+                            st.success(f"✅ {sucessos} caso(s) transferido(s) com sucesso para {dono_selecionado}!")
                             
-                            payload = [{'Id': row['ID do Caso'], 'OwnerId': novo_id} for _, row in casos_selecionados.iterrows()]
-                            sf.bulk.Case.update(payload)
-                            
-                            st.success(f"Sucesso! Casos transferidos para {dono_selecionado}.")
+                        if sucessos > 0 or erros:
+                            import time
+                            time.sleep(4) 
                             st.cache_data.clear() 
                             st.rerun() 
-                        except Exception as e:
-                            st.error(f"Erro na integração com Salesforce: {e}")
                 else:
                     st.warning("Por favor, selecione um proprietário na lista antes de transferir.")
 
