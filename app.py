@@ -416,7 +416,7 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES DA TABELA (SEM MEXER NO STATUS AUTOMÁTICO) ---
+        # --- SALVAR ALTERAÇÕES DA TABELA (SIMULANDO BOTÃO ACEITAR) ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
@@ -427,14 +427,14 @@ else:
                             id_caso = row['ID do Caso']
                             dono_original = row['ID do Proprietário']
                             
-                            # PASSO 1: Puxa o caso para o usuário da API (Burla a trava de edição)
+                            # PASSO 1: Simula o clique exato no botão Aceitar
                             if api_user_id and dono_original != api_user_id:
-                                sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': 'Em Tratativa'}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
-                            # PASSO 2: Faz a edição (O Salesforce aceita porque somos o dono agora)
+                            # PASSO 2: Aplica as edições do usuário
                             sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
                             
-                            # PASSO 3: Devolve o caso educadamente para o dono original
+                            # PASSO 3: Devolve o caso
                             if api_user_id and dono_original != api_user_id:
                                 sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                             
@@ -446,7 +446,7 @@ else:
 
         st.markdown("---")
 
-        # --- TRANSFERÊNCIA E COMENTÁRIOS (APENAS ACEITAR -> TRANSFERIR) ---
+        # --- TRANSFERÊNCIA E COMENTÁRIOS (SIMULANDO BOTÃO ACEITAR) ---
         casos_selecionados = edited_df[edited_df['Selecionar'] == True]
         if not casos_selecionados.empty:
             st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para ações em massa:**")
@@ -470,11 +470,11 @@ else:
                                 dono_original = row['ID do Proprietário']
                                 
                                 try:
-                                    # PASSO 1: Toma posse do caso (Simula o Aceitar para garantir direitos de edição)
+                                    # PASSO 1: Simula o botão Aceitar (Owner = API_User E Status = Em Tratativa)
                                     if api_user_id and dono_original != api_user_id:
-                                        sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                        sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': 'Em Tratativa'}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # PASSO 2: Transfere para o destino final (Sem mexer no Status)
+                                    # PASSO 2: Transfere para a nova fila final
                                     if novo_id != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
