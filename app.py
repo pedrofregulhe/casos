@@ -57,7 +57,7 @@ def init_connection():
 sf = init_connection()
 
 # --- FUNÇÕES DE BUSCA ---
-@st.cache_data(ttl=3600) 
+@st.cache_data(ttl=3600, show_spinner="Atualizando lista de proprietários...") 
 def get_owner_options():
     sf_conn = init_connection()
     users = sf_conn.query_all("SELECT Id, Name FROM User WHERE IsActive = TRUE")
@@ -71,7 +71,7 @@ def get_owner_options():
         
     return dict(sorted(opcoes.items()))
 
-@st.cache_data(ttl=1800) 
+@st.cache_data(ttl=1800, show_spinner="Sincronizando casos com o Salesforce. Isso pode levar alguns segundos...") 
 def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
     if periodo_selecionado == "Personalizado" and dt_inicio and dt_fim:
         inicio_str = dt_inicio.strftime('%Y-%m-%dT00:00:00Z')
@@ -129,7 +129,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
         data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
         
-        # --- CÁLCULO DE IDADE CORRIGIDO ---
         fim_calc = data_fechamento if data_fechamento else hoje_utc
         idade_dias = (fim_calc - data_abertura).days
         
@@ -150,6 +149,8 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             'Tipo Salesforce': record['Type'] if record['Type'] else 'E-mail',
             'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
             'Motivo': record['FOZ_Motivo__c'],
+            'Detalhe': record['FOZ_Detalhe__c'],
+            'Subdetalhe': record['FOZ_Subdetalhe__c'],
             'Status': record['Status'],
             'Macro Status': macro_status,
             'SLA Atrasado': '🔴 Atrasado' if sla_atrasado else '✅ No Prazo',
@@ -226,6 +227,8 @@ if periodo_selecionado == "Personalizado":
         st.stop()
 
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
+
+# Carrega os dados (com as novas mensagens de spinner)
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados)
 lista_proprietarios = get_owner_options()
 
@@ -431,7 +434,8 @@ else:
                                 id_caso = row['ID do Caso']
                                 num_caso = row['Número']
                                 try:
-                                    sf.Case.update(id_caso, {'OwnerId': novo_id})
+                                    # CORREÇÃO: Bypass nas Regras de Atribuição
+                                    sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                     sucessos += 1
                                 except Exception as e:
                                     msg_erro = str(e)
