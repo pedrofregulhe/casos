@@ -8,7 +8,7 @@ import plotly.express as px
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
 
-# --- CSS CUSTOMIZADO (FUNDO BRANCO E LIMPEZA) ---
+# --- CSS CUSTOMIZADO ---
 st.markdown("""
     <style>
     .stApp { background-color: #ffffff !important; }
@@ -32,37 +32,85 @@ st.markdown("""
         background-color: #0056b3 !important;
         color: white !important;
     }
+    .btn-login>button {
+        border-radius: 8px !important;
+        margin-top: 10px !important;
+        background-color: #0056b3 !important;
+        color: white !important;
+        border: none !important;
+    }
+    .btn-login>button:hover {
+        background-color: #004494 !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # --- FUSO HORÁRIO BRASIL (UTC -3) ---
 fuso_br = timezone(timedelta(hours=-3))
 
-# --- CONTROLE DE ESTADO ---
+# --- CONTROLE DE ESTADO & SESSÃO ---
 if 'fila_selecionada' not in st.session_state:
     st.session_state.fila_selecionada = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
+if 'sf_authenticated' not in st.session_state:
+    st.session_state.sf_authenticated = False
+if 'sf_username' not in st.session_state:
+    st.session_state.sf_username = ""
+if 'sf_password' not in st.session_state:
+    st.session_state.sf_password = ""
+if 'sf_token' not in st.session_state:
+    st.session_state.sf_token = ""
 
-# --- CONEXÃO COM SALESFORCE ---
+# --- TELA DE LOGIN ---
+if not st.session_state.sf_authenticated:
+    col_vazia1, col_login, col_vazia2 = st.columns([1, 2, 1])
+    with col_login:
+        st.markdown("<h2 style='text-align: center; color: #0c1c2b; margin-top: 50px;'>🔐 Login Operacional</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #6c757d; margin-bottom: 30px;'>Conecte-se com suas credenciais do Salesforce para gerenciar os casos em seu nome.</p>", unsafe_allow_html=True)
+        
+        with st.form("login_form"):
+            st.info("ℹ️ **Segurança:** O painel NÃO salva sua senha em nenhum banco de dados. As credenciais são usadas apenas enquanto essa janela estiver aberta.")
+            user_input = st.text_input("👤 Usuário (E-mail Salesforce)")
+            pwd_input = st.text_input("🔑 Senha", type="password")
+            token_input = st.text_input("🛡️ Token de Segurança", type="password")
+            
+            st.markdown("<div class='btn-login'>", unsafe_allow_html=True)
+            submitted = st.form_submit_button("Entrar no Painel", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            if submitted:
+                if user_input and pwd_input and token_input:
+                    try:
+                        with st.spinner("Autenticando no Salesforce..."):
+                            # Tenta fazer a conexão inicial
+                            Salesforce(username=user_input, password=pwd_input, security_token=token_input, domain='login')
+                            
+                            # Se deu certo, salva na sessão
+                            st.session_state.sf_authenticated = True
+                            st.session_state.sf_username = user_input
+                            st.session_state.sf_password = pwd_input
+                            st.session_state.sf_token = token_input
+                            st.rerun()
+                    except Exception as e:
+                        st.error("❌ Falha na autenticação. Verifique seu usuário, senha e token de segurança.")
+                else:
+                    st.warning("⚠️ Por favor, preencha todos os campos.")
+    st.stop() # Interrompe a execução aqui se não estiver logado
+
+# --- CONEXÃO DINÂMICA (Baseada no Usuário Logado) ---
 @st.cache_resource
-def init_connection():
-    return Salesforce(
-        username=st.secrets["sf_username"],
-        password=st.secrets["sf_password"],
-        security_token=st.secrets["sf_token"],
-        domain='login'
-    )
+def init_connection(user, pwd, token):
+    return Salesforce(username=user, password=pwd, security_token=token, domain='login')
 
-sf = init_connection()
+sf = init_connection(st.session_state.sf_username, st.session_state.sf_password, st.session_state.sf_token)
 
 # --- FUNÇÕES DE BUSCA ---
 @st.cache_data(ttl=86400)
-def get_api_user_id():
-    sf_conn = init_connection()
+def get_api_user_id(username, _pwd, _token):
+    sf_conn = init_connection(username, _pwd, _token)
     try:
-        username_api = st.secrets["sf_username"]
-        res = sf_conn.query(f"SELECT Id FROM User WHERE Username = '{username_api}'")
+        res = sf_conn.query(f"SELECT Id FROM User WHERE Username = '{username}'")
         if res['totalSize'] > 0:
             return res['records'][0]['Id']
     except Exception as e:
@@ -70,8 +118,8 @@ def get_api_user_id():
     return None
 
 @st.cache_data(ttl=3600, show_spinner="Atualizando lista de proprietários...") 
-def get_owner_options():
-    sf_conn = init_connection()
+def get_owner_options(username, _pwd, _token):
+    sf_conn = init_connection(username, _pwd, _token)
     users = sf_conn.query_all("SELECT Id, Name FROM User WHERE IsActive = TRUE")
     queues = sf_conn.query_all("SELECT Id, Name FROM Group WHERE Type = 'Queue'")
     
@@ -84,7 +132,8 @@ def get_owner_options():
     return dict(sorted(opcoes.items()))
 
 @st.cache_data(ttl=1800, show_spinner="Sincronizando casos com o Salesforce. Isso pode levar alguns segundos...") 
-def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
+def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username, _pwd, _token):
+    sf_conn = init_connection(username, _pwd, _token)
     if periodo_selecionado == "Personalizado" and dt_inicio and dt_fim:
         inicio_str = dt_inicio.strftime('%Y-%m-%dT00:00:00Z')
         fim_str = dt_fim.strftime('%Y-%m-%dT23:59:59Z')
@@ -100,7 +149,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # A subquery agora puxa CommentBody, CreatedBy.Name e CreatedDate
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
@@ -113,7 +161,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
       AND {filtro_data}
       {filtro_status}
     """
-    result = sf.query_all(query)
+    result = sf_conn.query_all(query)
     sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
     
     linhas = []
@@ -127,7 +175,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
         ]
         
-        # --- NOVO: INTERCEPTAÇÃO DA FILA SAFETY ---
         if "SAFETY" in dono_upper:
             fila_principal = "SAFETY"
             subfila = dono_upper
@@ -154,7 +201,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
             classificacao = record['Account']['FOZ_Classificacao__c']
             
-        # --- NOVO: HISTÓRICO COMPLETO DE COMENTÁRIOS COM AUTOR E DATA ---
         desc_oficial = record.get('Description')
         historico_comentarios = ""
         
@@ -163,7 +209,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
                 autor = comment['CreatedBy']['Name'] if comment.get('CreatedBy') else 'Usuário'
                 texto = comment['CommentBody']
                 try:
-                    # Tenta formatar a data do comentário para o padrão Brasileiro
                     dt_obj = pd.to_datetime(comment['CreatedDate']).tz_convert(fuso_br)
                     data_str = dt_obj.strftime('%d/%m/%Y %H:%M')
                 except:
@@ -171,7 +216,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
                     
                 historico_comentarios += f"🗣️ {autor} em {data_str}:\n{texto}\n\n"
         
-        # Junta a descrição oficial com os comentários em um texto único e formatado
         if desc_oficial and historico_comentarios:
             descricao_final = f"📝 DESCRIÇÃO ORIGINAL:\n{desc_oficial}\n\n{'-'*40}\n\n💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
         elif historico_comentarios:
@@ -219,8 +263,6 @@ def desenhar_card(fila_nome, df_fila):
     atr = len(df_fila[(df_fila['SLA Atrasado'] == '🔴 Atrasado') & (df_fila['Macro Status'] == '🟡 Em Tratativa')])
     
     cor_atraso = "#d9534f" if atr > 0 else "#555555"
-    
-    # Destaca visualmente o card de Safety
     borda_destaque = "border-top: 4px solid #d9534f;" if fila_nome == "SAFETY" else ""
     
     html_card = f"""
@@ -245,19 +287,28 @@ try:
 except Exception:
     st.sidebar.markdown("<h2>Filtros</h2>", unsafe_allow_html=True)
 
+st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
 st.markdown("""
     <style>
-    [data-testid="stSidebar"] div.stButton { display: flex; justify-content: center; width: 100%; }
-    [data-testid="stSidebar"] div.stButton > button { width: 95% !important; border-radius: 6px !important; background-color: #0056b3 !important; color: white !important; margin-top: 10px !important; border: none !important; }
-    [data-testid="stSidebar"] div.stButton > button:hover { background-color: #004494 !important; }
+    [data-testid="stSidebar"] div.stButton > button { width: 95% !important; border-radius: 6px !important; margin-top: 10px !important; border: none !important; }
     </style>
 """, unsafe_allow_html=True)
 
 if st.sidebar.button("🔄 Sincronizar Agora", type="primary", use_container_width=True):
     st.cache_data.clear()
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
+    st.rerun()
+
+if st.sidebar.button("🚪 Sair (Logout)", use_container_width=True):
+    st.session_state.sf_authenticated = False
+    st.session_state.sf_username = ""
+    st.session_state.sf_password = ""
+    st.session_state.sf_token = ""
+    st.session_state.fila_selecionada = None
+    st.cache_data.clear()
+    st.cache_resource.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -274,9 +325,13 @@ if periodo_selecionado == "Personalizado":
         st.stop()
 
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
-df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados)
-lista_proprietarios = get_owner_options()
-api_user_id = get_api_user_id()
+
+# Chamada das funções usando os dados da sessão logada
+user, pwd, token = st.session_state.sf_username, st.session_state.sf_password, st.session_state.sf_token
+
+df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, user, pwd, token)
+lista_proprietarios = get_owner_options(user, pwd, token)
+api_user_id = get_api_user_id(user, pwd, token)
 
 # --- ORDENAÇÃO DAS FILAS ---
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
@@ -467,7 +522,7 @@ else:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
             if st.button("💾 Salvar Alterações no Salesforce", type="primary"):
                 if api_user_id is None:
-                    st.error("Erro: Não foi possível identificar o usuário da API para realizar a alteração de propriedade.")
+                    st.error("Erro: Não foi possível identificar seu usuário para realizar a alteração.")
                 else:
                     with st.spinner("Atualizando registros..."):
                         try:
@@ -475,14 +530,14 @@ else:
                                 id_caso = row['ID do Caso']
                                 dono_original = row['ID do Proprietário']
                                 
-                                # PASSO 1: Toma posse do caso enviando APENAS o OwnerId
+                                # PASSO 1: Toma posse do caso (Burlar bloqueio)
                                 if dono_original != api_user_id:
                                     sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                     
-                                # PASSO 2: Aplica as edições solicitadas pelo usuário (Status / Motivo)
+                                # PASSO 2: Aplica as edições
                                 sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
-                                # PASSO 3: Devolve a posse para a fila/dono original
+                                # PASSO 3: Devolve a posse
                                 if dono_original != api_user_id:
                                     sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
@@ -509,7 +564,7 @@ else:
                     if not dono_selecionado:
                         st.warning("Por favor, selecione um proprietário.")
                     elif api_user_id is None:
-                        st.error("Erro: Não foi possível identificar o usuário da API. Verifique o sf_username no arquivo secrets.")
+                        st.error("Erro: Não foi possível identificar seu usuário.")
                     else:
                         with st.spinner("Transferindo casos no Salesforce..."):
                             novo_id = lista_proprietarios[dono_selecionado]
@@ -522,11 +577,11 @@ else:
                                 dono_original = row['ID do Proprietário']
                                 
                                 try:
-                                    # PASSO 1: Toma posse do caso enviando APENAS o OwnerId
+                                    # PASSO 1: Toma posse do caso
                                     if dono_original != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # PASSO 2: Transfere para a fila final enviando APENAS o OwnerId
+                                    # PASSO 2: Transfere para o destino final
                                     if novo_id != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
