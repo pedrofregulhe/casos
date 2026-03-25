@@ -76,7 +76,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # QUERY ATUALIZADA COM FOZ_Classificacao__c
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status,
@@ -114,7 +113,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
         data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
         
-        # Tratamento seguro para pegar a classificação
         classificacao = '-'
         if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
             classificacao = record['Account']['FOZ_Classificacao__c']
@@ -297,10 +295,9 @@ else:
     """
     st.markdown(html_kpi_detalhe, unsafe_allow_html=True)
 
-    # --- 2. EXTRATO (TABELA, EXCEL E BULK UPDATE) ---
+    # --- 2. EXTRATO (TABELA, EXCEL E BULK UPDATE INTELIGENTE) ---
     st.markdown("#### Extrato e Ações em Massa")
     
-    # Inserimos a coluna "Selecionar" no início do DataFrame para o editor
     df_view.insert(0, 'Selecionar', False)
     
     col_dl, col_aviso = st.columns([1, 3])
@@ -308,7 +305,6 @@ else:
         def to_excel(df_export):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Removemos a coluna 'Selecionar' antes de exportar
                 df_temp = df_export.drop(columns=['Selecionar']).copy()
                 df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
                 if df_temp['Fechamento'].notna().any():
@@ -323,7 +319,7 @@ else:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     with col_aviso:
-        st.caption("💡 **Dica:** Marque a caixa 'Selecionar' nos casos que deseja transferir de fila. Para filtros, use a lupa no cabeçalho das colunas.")
+        st.caption("💡 **Dica:** Marque a caixa 'Selecionar' nos casos que deseja transferir. Para filtros, use a lupa no cabeçalho das colunas.")
     
     def colorir_linha(row):
         cor = '#ffebee' if row['SLA Atrasado'] == 'Atrasado' else '#ffffff'
@@ -331,7 +327,6 @@ else:
 
     df_estilizado = df_view.style.apply(colorir_linha, axis=1)
 
-    # Tabela Editável (Data Editor)
     edited_df = st.data_editor(
         df_estilizado,
         column_config={
@@ -341,37 +336,57 @@ else:
             "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
             "ID do Caso": None
         },
-        disabled=df_view.columns.drop('Selecionar'), # Impede a edição de outras colunas
+        disabled=df_view.columns.drop('Selecionar'),
         use_container_width=True,
         hide_index=True,
         key=f"editor_{fila_atual}"
     )
     
-    # --- PAINEL DE TRANSFERÊNCIA EM MASSA ---
+    # --- NOVO PAINEL DE TRANSFERÊNCIA COM BUSCA POR NOME ---
     casos_selecionados = edited_df[edited_df['Selecionar'] == True]
     if not casos_selecionados.empty:
         st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para transferência.**")
         
         col_input, col_btn, _ = st.columns([2, 2, 4])
         with col_input:
-            novo_owner = st.text_input("ID do Novo Proprietário (Usuário ou Fila):", placeholder="Ex: 00G...", max_chars=18)
+            novo_owner_nome = st.text_input("Nome do Novo Proprietário (Usuário ou Fila):", placeholder="Ex: CARTEIRA_L_01")
         with col_btn:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             if st.button("🔄 Transferir Casos Selecionados", type="primary", use_container_width=True):
-                if len(novo_owner) in [15, 18]:
-                    with st.spinner("Transferindo casos no Salesforce..."):
+                if novo_owner_nome:
+                    with st.spinner("Buscando proprietário e transferindo casos..."):
                         try:
-                            # Monta o pacote de dados para o Bulk Update
-                            payload = [{'Id': row['ID do Caso'], 'OwnerId': novo_owner} for _, row in casos_selecionados.iterrows()]
-                            sf.bulk.Case.update(payload)
+                            # Prevenção contra injeção de aspas
+                            nome_seguro = novo_owner_nome.replace("'", "\\'")
                             
-                            st.success(f"Casos transferidos com sucesso!")
-                            st.cache_data.clear() # Força a busca de dados novos
-                            st.rerun() # Atualiza a tela
+                            # 1. Tenta achar Usuário
+                            user_query = f"SELECT Id FROM User WHERE Name = '{nome_seguro}' LIMIT 1"
+                            user_res = sf.query(user_query)
+                            
+                            novo_id = None
+                            if user_res['totalSize'] > 0:
+                                novo_id = user_res['records'][0]['Id']
+                            else:
+                                # 2. Tenta achar Fila (Group) se não for Usuário
+                                queue_query = f"SELECT Id FROM Group WHERE Type = 'Queue' AND Name = '{nome_seguro}' LIMIT 1"
+                                queue_res = sf.query(queue_query)
+                                if queue_res['totalSize'] > 0:
+                                    novo_id = queue_res['records'][0]['Id']
+                                    
+                            # Se achou um ID, faz o bulk update
+                            if novo_id:
+                                payload = [{'Id': row['ID do Caso'], 'OwnerId': novo_id} for _, row in casos_selecionados.iterrows()]
+                                sf.bulk.Case.update(payload)
+                                
+                                st.success(f"Sucesso! Os casos foram transferidos para {novo_owner_nome}.")
+                                st.cache_data.clear() 
+                                st.rerun() 
+                            else:
+                                st.error(f"Não encontramos nenhum Usuário ou Fila com o nome exato: '{novo_owner_nome}'. Verifique a ortografia.")
                         except Exception as e:
                             st.error(f"Erro na integração com Salesforce: {e}")
                 else:
-                    st.error("O ID deve ter exatamente 15 ou 18 caracteres (padrão Salesforce).")
+                    st.warning("Por favor, digite o nome do novo proprietário.")
 
     st.markdown("---")
 
