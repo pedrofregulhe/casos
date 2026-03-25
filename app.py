@@ -416,7 +416,7 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES DA TABELA (DANÇA EM 3 PASSOS) ---
+        # --- SALVAR ALTERAÇÕES DA TABELA (SEM MEXER NO STATUS AUTOMÁTICO) ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
@@ -446,7 +446,7 @@ else:
 
         st.markdown("---")
 
-        # --- TRANSFERÊNCIA E COMENTÁRIOS (DANÇA EM 3 PASSOS) ---
+        # --- TRANSFERÊNCIA E COMENTÁRIOS (APENAS ACEITAR -> TRANSFERIR) ---
         casos_selecionados = edited_df[edited_df['Selecionar'] == True]
         if not casos_selecionados.empty:
             st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para ações em massa:**")
@@ -470,14 +470,11 @@ else:
                                 dono_original = row['ID do Proprietário']
                                 
                                 try:
-                                    # PASSO 1: Toma posse do caso para garantir direitos de edição
+                                    # PASSO 1: Toma posse do caso (Simula o Aceitar para garantir direitos de edição)
                                     if api_user_id and dono_original != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # PASSO 2: Força o status 'Em Aberto' ANTES de transferir
-                                    sf.Case.update(id_caso, {'Status': 'Em Aberto'}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                    
-                                    # PASSO 3: Transfere para o destino final (Só se o destino não for a própria API)
+                                    # PASSO 2: Transfere para o destino final (Sem mexer no Status)
                                     if novo_id != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
@@ -495,7 +492,7 @@ else:
                                 st.error(f"⚠️ O Salesforce bloqueou a transferência de {len(erros)} caso(s):")
                                 for err in erros: st.warning(err)
                             if sucessos > 0:
-                                st.success(f"✅ {sucessos} caso(s) transferido(s) com sucesso para o status 'Em Aberto'!")
+                                st.success(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
                             if sucessos > 0 or erros:
                                 import time
                                 time.sleep(4) 
