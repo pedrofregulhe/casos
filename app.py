@@ -76,10 +76,11 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
     if not incluir_fechados:
         filtro_status = "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # QUERY ATUALIZADA COM FOZ_Classificacao__c
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status,
-        Account.Name, Account.FOZ_CPF__c,
+        Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
         Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones)
     FROM Case 
@@ -113,6 +114,11 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
         data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
         
+        # Tratamento seguro para pegar a classificação
+        classificacao = '-'
+        if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
+            classificacao = record['Account']['FOZ_Classificacao__c']
+        
         linhas.append({
             'ID do Caso': record['Id'],
             'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
@@ -130,7 +136,8 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             'Status': record['Status'],
             'Macro Status': macro_status,
             'SLA Atrasado': 'Atrasado' if sla_atrasado else 'No Prazo',
-            'Conta': record['Account']['Name'] if record['Account'] else '-'
+            'Conta': record['Account']['Name'] if record['Account'] else '-',
+            'Classificação': classificacao
         })
         
     df_final = pd.DataFrame(linhas)
@@ -290,15 +297,19 @@ else:
     """
     st.markdown(html_kpi_detalhe, unsafe_allow_html=True)
 
-    # --- 2. EXTRATO (TABELA E EXCEL) ---
-    st.markdown("#### Extrato de Casos")
+    # --- 2. EXTRATO (TABELA, EXCEL E BULK UPDATE) ---
+    st.markdown("#### Extrato e Ações em Massa")
+    
+    # Inserimos a coluna "Selecionar" no início do DataFrame para o editor
+    df_view.insert(0, 'Selecionar', False)
+    
     col_dl, col_aviso = st.columns([1, 3])
     with col_dl:
         def to_excel(df_export):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Remove fuso horário antes de salvar no Excel
-                df_temp = df_export.copy()
+                # Removemos a coluna 'Selecionar' antes de exportar
+                df_temp = df_export.drop(columns=['Selecionar']).copy()
                 df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
                 if df_temp['Fechamento'].notna().any():
                     df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
@@ -306,35 +317,65 @@ else:
             return output.getvalue()
 
         st.download_button(
-            label=f"📥 Baixar Extrato ({len(df_view)} registros)",
+            label=f"📥 Baixar Extrato",
             data=to_excel(df_view),
             file_name=f'extrato_{fila_atual.replace(" ", "_").lower()}.xlsx',
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     with col_aviso:
-        st.caption("💡 **Dica:** Passe o rato sobre o cabeçalho de qualquer coluna abaixo e clique no ícone da lupa para aplicar filtros.")
+        st.caption("💡 **Dica:** Marque a caixa 'Selecionar' nos casos que deseja transferir de fila. Para filtros, use a lupa no cabeçalho das colunas.")
     
-    # Formatação condicional (Cor Vermelha nos Atrasos)
     def colorir_linha(row):
         cor = '#ffebee' if row['SLA Atrasado'] == 'Atrasado' else '#ffffff'
         return [f'background-color: {cor}' for _ in row]
 
-    df_estilizado = df_view.style.apply(colorir_linha, axis=1).hide(axis="index")
+    df_estilizado = df_view.style.apply(colorir_linha, axis=1)
 
-    st.dataframe(
+    # Tabela Editável (Data Editor)
+    edited_df = st.data_editor(
         df_estilizado,
         column_config={
+            "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
             "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
             "ID do Caso": None
         },
-        use_container_width=True
+        disabled=df_view.columns.drop('Selecionar'), # Impede a edição de outras colunas
+        use_container_width=True,
+        hide_index=True,
+        key=f"editor_{fila_atual}"
     )
     
+    # --- PAINEL DE TRANSFERÊNCIA EM MASSA ---
+    casos_selecionados = edited_df[edited_df['Selecionar'] == True]
+    if not casos_selecionados.empty:
+        st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para transferência.**")
+        
+        col_input, col_btn, _ = st.columns([2, 2, 4])
+        with col_input:
+            novo_owner = st.text_input("ID do Novo Proprietário (Usuário ou Fila):", placeholder="Ex: 00G...", max_chars=18)
+        with col_btn:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("🔄 Transferir Casos Selecionados", type="primary", use_container_width=True):
+                if len(novo_owner) in [15, 18]:
+                    with st.spinner("Transferindo casos no Salesforce..."):
+                        try:
+                            # Monta o pacote de dados para o Bulk Update
+                            payload = [{'Id': row['ID do Caso'], 'OwnerId': novo_owner} for _, row in casos_selecionados.iterrows()]
+                            sf.bulk.Case.update(payload)
+                            
+                            st.success(f"Casos transferidos com sucesso!")
+                            st.cache_data.clear() # Força a busca de dados novos
+                            st.rerun() # Atualiza a tela
+                        except Exception as e:
+                            st.error(f"Erro na integração com Salesforce: {e}")
+                else:
+                    st.error("O ID deve ter exatamente 15 ou 18 caracteres (padrão Salesforce).")
+
     st.markdown("---")
 
-    # --- 3. GRÁFICOS (TENDÊNCIA, IDADE E SLA) ---
+    # --- 3. GRÁFICOS (TENDÊNCIA E IDADE) ---
     st.markdown("#### Tendência Operacional")
     
     df_trend_abertos = df_view[df_view['Abertura'].notna()].copy()
@@ -354,7 +395,6 @@ else:
         fig_trend.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), plot_bgcolor='rgba(0,0,0,0)', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         st.plotly_chart(fig_trend, use_container_width=True)
 
-    # Gráficos Inferiores
     st.markdown("#### Análise de Backlog em Aberto")
     c1, c2 = st.columns(2, gap="large")
     with c1:
