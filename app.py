@@ -4,6 +4,7 @@ from simple_salesforce import Salesforce
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
+import time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
@@ -83,10 +84,7 @@ if not st.session_state.sf_authenticated:
                 if user_input and pwd_input and token_input:
                     try:
                         with st.spinner("Autenticando no Salesforce..."):
-                            # Tenta fazer a conexão inicial
                             Salesforce(username=user_input, password=pwd_input, security_token=token_input, domain='login')
-                            
-                            # Se deu certo, salva na sessão
                             st.session_state.sf_authenticated = True
                             st.session_state.sf_username = user_input
                             st.session_state.sf_password = pwd_input
@@ -96,9 +94,9 @@ if not st.session_state.sf_authenticated:
                         st.error("❌ Falha na autenticação. Verifique seu usuário, senha e token de segurança.")
                 else:
                     st.warning("⚠️ Por favor, preencha todos os campos.")
-    st.stop() # Interrompe a execução aqui se não estiver logado
+    st.stop()
 
-# --- CONEXÃO DINÂMICA (Baseada no Usuário Logado) ---
+# --- CONEXÃO DINÂMICA ---
 @st.cache_resource
 def init_connection(user, pwd, token):
     return Salesforce(username=user, password=pwd, security_token=token, domain='login')
@@ -149,6 +147,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # Correção SOQL: Adicionada a busca pela Fila Genérica independente de ter Type = OA
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
@@ -157,7 +156,9 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         (SELECT IsViolated FROM CaseMilestones),
         (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
     FROM Case 
-    WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)))
+    WHERE (Type = 'OA' 
+           OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)) 
+           OR Owner.Name LIKE 'Casos sem fila - GEN%')
       AND {filtro_data}
       {filtro_status}
     """
@@ -177,6 +178,9 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         
         if "SAFETY" in dono_upper:
             fila_principal = "SAFETY"
+            subfila = dono_upper
+        elif "CASOS SEM FILA - GEN" in dono_upper:
+            fila_principal = "CASOS SEM FILA - GENÉRICO"
             subfila = dono_upper
         elif dono_upper in filas_conhecidas:
             fila_principal = dono_upper
@@ -228,23 +232,19 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             'ID do Proprietário': record['OwnerId'],
             'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
             'Número': record['CaseNumber'],
-            'Abertura': data_abertura,
-            'Fechamento': data_fechamento,
-            'Idade (Dias)': idade_dias,
+            'Status': record['Status'],
+            'Motivo': record['FOZ_Motivo__c'],
+            'Descrição': descricao_final,
             'Fila Principal': fila_principal,
             'Subfila': subfila,
-            'Origem': record['Origin'],
-            'Tipo Salesforce': record['Type'] if record['Type'] else 'E-mail',
-            'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
-            'Motivo': record['FOZ_Motivo__c'],
-            'Detalhe': record['FOZ_Detalhe__c'],
-            'Subdetalhe': record['FOZ_Subdetalhe__c'],
-            'Status': record['Status'],
             'Macro Status': macro_status,
+            'Idade (Dias)': idade_dias,
             'SLA Atrasado': '🔴 Atrasado' if sla_atrasado else '✅ No Prazo',
+            'Origem': record['Origin'],
+            'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
             'Conta': record['Account']['Name'] if record['Account'] else '-',
-            'Classificação': classificacao,
-            'Descrição': descricao_final
+            'Abertura': data_abertura,
+            'Fechamento': data_fechamento
         })
         
     df_final = pd.DataFrame(linhas)
@@ -290,6 +290,9 @@ except Exception:
 st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
+# Busca Global adicionada à Sidebar
+busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
+
 st.markdown("""
     <style>
     [data-testid="stSidebar"] div.stButton > button { width: 95% !important; border-radius: 6px !important; margin-top: 10px !important; border: none !important; }
@@ -326,12 +329,18 @@ if periodo_selecionado == "Personalizado":
 
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 
-# Chamada das funções usando os dados da sessão logada
 user, pwd, token = st.session_state.sf_username, st.session_state.sf_password, st.session_state.sf_token
-
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, user, pwd, token)
 lista_proprietarios = get_owner_options(user, pwd, token)
 api_user_id = get_api_user_id(user, pwd, token)
+
+# Aplicação da Busca Global
+if busca_global and not df_filtrado.empty:
+    mask = (
+        df_filtrado['Número'].astype(str).str.contains(busca_global, case=False, na=False) |
+        df_filtrado['Conta'].astype(str).str.contains(busca_global, case=False, na=False)
+    )
+    df_filtrado = df_filtrado[mask]
 
 # --- ORDENAÇÃO DAS FILAS ---
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
@@ -381,10 +390,9 @@ else:
     # --- SISTEMA DE FILTROS DINÂMICOS NA VISÃO DE DETALHE ---
     col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
     
-    # Filtro 1: Subfila (Carteira, Usuário ou Safety)
     with col_f1:
-        if fila_atual in ["CORPORATIVO", "ATRIBUÍDO AO USUÁRIO", "SAFETY"]:
-            label_filtro = "📌 Filtrar Carteira:" if fila_atual == "CORPORATIVO" else "👤 Filtrar Usuário:"
+        if fila_atual in ["CORPORATIVO", "ATRIBUÍDO AO USUÁRIO", "SAFETY", "CASOS SEM FILA - GENÉRICO"]:
+            label_filtro = "📌 Filtrar Carteira:" if fila_atual == "CORPORATIVO" else "👤 Filtrar Subfila/Usuário:"
             subfilas_disp = sorted(df_view['Subfila'].dropna().unique().tolist())
             subfila_sel = st.selectbox(label_filtro, ["Todos"] + subfilas_disp)
             
@@ -393,7 +401,6 @@ else:
         else:
             st.empty() 
 
-    # Filtro 2: Status (Aparece em TODAS as filas)
     with col_f2:
         status_disp = sorted(df_view['Status'].dropna().unique().tolist())
         status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
@@ -470,6 +477,13 @@ else:
 
     # === ABA 2: EXTRATO E AÇÕES EM MASSA ===
     with tab2:
+        # CONGELAMENTO DE COLUNAS (Reordenação Estratégica)
+        colunas_ordem_ideal = [
+            'Número', 'Status', 'Motivo', 'Link Salesforce', 'Descrição', 
+            'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'SLA Atrasado',
+            'Origem', 'Tipo Solicitação', 'Conta', 'Abertura', 'Fechamento', 'ID do Caso', 'ID do Proprietário'
+        ]
+        df_view = df_view[colunas_ordem_ideal]
         df_view.insert(0, 'Selecionar', False)
         
         col_dl, col_aviso = st.columns([1, 3])
@@ -477,7 +491,7 @@ else:
             def to_excel(df_export):
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário']).copy() 
+                    df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
                     df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
                     if df_temp['Fechamento'].notna().any():
                         df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
@@ -491,7 +505,7 @@ else:
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
         with col_aviso:
-            st.caption("💡 **Dica:** Marque a caixa para Comentar/Transferir em lote. Dê dois cliques no **Status/Motivo** para editar a tabela e salvar.")
+            st.caption("💡 **Dica:** Marque a caixa para realizar Ações em Massa abaixo. Dê dois cliques no **Status/Motivo** para editar a tabela e salvar.")
 
         def colorir_linha(row):
             return ['background-color: #ffebee' if row['SLA Atrasado'] == '🔴 Atrasado' else 'background-color: #ffffff' for _ in row]
@@ -530,18 +544,16 @@ else:
                                 id_caso = row['ID do Caso']
                                 dono_original = row['ID do Proprietário']
                                 
-                                # PASSO 1: Toma posse do caso (Burlar bloqueio)
                                 if dono_original != api_user_id:
                                     sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                     
-                                # PASSO 2: Aplica as edições
                                 sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
-                                # PASSO 3: Devolve a posse
                                 if dono_original != api_user_id:
                                     sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
-                            st.success("Alterações salvas com sucesso!")
+                            st.toast("✅ Alterações salvas com sucesso no Salesforce!")
+                            time.sleep(2)
                             st.cache_data.clear()
                             st.rerun()
                         except Exception as e:
@@ -549,13 +561,14 @@ else:
 
         st.markdown("---")
 
-        # --- TRANSFERÊNCIA E COMENTÁRIOS ---
+        # --- AÇÕES EM MASSA (TRANSFERIR, COMENTAR, FOLLOW-UP) ---
         casos_selecionados = edited_df[edited_df['Selecionar'] == True]
         if not casos_selecionados.empty:
             st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para ações em massa:**")
             
-            c_transf, c_coment = st.columns(2, gap="large")
+            c_transf, c_coment, c_followup = st.columns(3, gap="large")
             
+            # --- 1. TRANSFERIR ---
             with c_transf:
                 st.markdown("##### 🔄 Transferir Casos")
                 dono_selecionado = st.selectbox("Selecione o Novo Proprietário:", [""] + list(lista_proprietarios.keys()))
@@ -577,11 +590,9 @@ else:
                                 dono_original = row['ID do Proprietário']
                                 
                                 try:
-                                    # PASSO 1: Toma posse do caso
                                     if dono_original != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # PASSO 2: Transfere para o destino final
                                     if novo_id != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
@@ -599,16 +610,15 @@ else:
                                 st.error(f"⚠️ O Salesforce bloqueou a transferência de {len(erros)} caso(s):")
                                 for err in erros: st.warning(err)
                             if sucessos > 0:
-                                st.success(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
-                            if sucessos > 0 or erros:
-                                import time
-                                time.sleep(4) 
+                                st.toast(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
+                                time.sleep(2)
                                 st.cache_data.clear() 
                                 st.rerun() 
 
+            # --- 2. COMENTAR ---
             with c_coment:
                 st.markdown("##### 💬 Comentar em Lote")
-                novo_comentario = st.text_area("Digite o comentário para todos os casos selecionados:", height=68)
+                novo_comentario = st.text_area("Digite o comentário a ser inserido:", height=68)
                 
                 if st.button("Inserir Comentário", use_container_width=True):
                     if novo_comentario.strip():
@@ -616,10 +626,41 @@ else:
                             try:
                                 payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados.iterrows()]
                                 sf.bulk.CaseComment.insert(payload)
-                                st.success("✅ Comentários inseridos com sucesso!")
+                                st.toast("✅ Comentários inseridos com sucesso!")
+                                time.sleep(2)
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Erro ao inserir comentário: {e}")
                     else:
                         st.warning("O comentário não pode estar vazio.")
+
+            # --- 3. CRIAR FOLLOW-UP (NOVO) ---
+            with c_followup:
+                st.markdown("##### 🔔 Criar Follow-up")
+                user_followup = st.selectbox("Notificar / Atribuir para:", [""] + list(lista_proprietarios.keys()), key="fup_user")
+                assunto_followup = st.text_input("Assunto da Tarefa:")
+                
+                if st.button("Criar Tarefa", use_container_width=True):
+                    if not user_followup or not assunto_followup.strip():
+                        st.warning("Selecione um usuário e digite o assunto.")
+                    else:
+                        with st.spinner("Criando tarefas de follow-up..."):
+                            try:
+                                dono_id_tarefa = lista_proprietarios[user_followup]
+                                payload = []
+                                for _, row in casos_selecionados.iterrows():
+                                    payload.append({
+                                        'WhatId': row['ID do Caso'],  # Vincula a tarefa ao caso
+                                        'OwnerId': dono_id_tarefa,    # Quem será notificado
+                                        'Subject': assunto_followup,
+                                        'Status': 'Open',
+                                        'Priority': 'Normal'
+                                    })
+                                sf.bulk.Task.insert(payload)
+                                st.toast("✅ Tarefas de Follow-up criadas com sucesso!")
+                                time.sleep(2)
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao criar Follow-up: {e}")
