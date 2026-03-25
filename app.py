@@ -98,13 +98,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # Adicionado OwnerId na query para conseguirmos devolver a posse após uma edição na tabela
+    # QUERY MÁGICA: Agora puxamos a Descrição oficial e também o Primeiro Comentário
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
         Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, OwnerId, Owner.Name, 
-        (SELECT IsViolated FROM CaseMilestones)
+        (SELECT IsViolated FROM CaseMilestones),
+        (SELECT CommentBody FROM CaseComments ORDER BY CreatedDate ASC LIMIT 1)
     FROM Case 
     WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)))
       AND {filtro_data}
@@ -146,6 +147,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         classificacao = '-'
         if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
             classificacao = record['Account']['FOZ_Classificacao__c']
+            
+        # LÓGICA DE DESCRIÇÃO: Se não tiver a oficial, pega a do CaseComment
+        desc_oficial = record.get('Description')
+        comentario_inicial = ""
+        if record.get('CaseComments') and record['CaseComments'].get('records'):
+            comentario_inicial = record['CaseComments']['records'][0]['CommentBody']
+            
+        descricao_final = desc_oficial if desc_oficial else comentario_inicial
         
         linhas.append({
             'ID do Caso': record['Id'],
@@ -168,7 +177,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             'SLA Atrasado': '🔴 Atrasado' if sla_atrasado else '✅ No Prazo',
             'Conta': record['Account']['Name'] if record['Account'] else '-',
             'Classificação': classificacao,
-            'Descrição': record['Description']
+            'Descrição': descricao_final
         })
         
     df_final = pd.DataFrame(linhas)
@@ -367,7 +376,7 @@ else:
             def to_excel(df_export):
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário']).copy() # Oculta o OwnerId do Excel
+                    df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário']).copy() 
                     df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
                     if df_temp['Fechamento'].notna().any():
                         df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
@@ -381,7 +390,7 @@ else:
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
         with col_aviso:
-            st.caption("💡 **Dica 1:** Marque a caixa para Comentar ou Transferir em lote. **Dica 2:** Dê dois cliques no **Status** ou **Motivo** para editar a tabela e salvar.")
+            st.caption("💡 **Dica:** Marque a caixa para Comentar/Transferir em lote. Dê dois cliques no **Status/Motivo** para editar a tabela e salvar.")
 
         def colorir_linha(row):
             return ['background-color: #ffebee' if row['SLA Atrasado'] == '🔴 Atrasado' else 'background-color: #ffffff' for _ in row]
@@ -393,7 +402,7 @@ else:
             column_config={
                 "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
                 "ID do Caso": None, 
-                "ID do Proprietário": None, # Esconde a coluna técnica
+                "ID do Proprietário": None, 
                 "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
                 "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
                 "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
@@ -406,7 +415,7 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES (COM AUTO-ACEITAR BLINDADO) ---
+        # --- SALVAR ALTERAÇÕES ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
@@ -417,11 +426,9 @@ else:
                             id_caso = row['ID do Caso']
                             dono_original = row['ID do Proprietário']
                             
-                            # 1. MÁGICA: Puxa para a API (Burla a regra)
                             if api_user_id and dono_original != api_user_id:
                                 sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
-                            # 2. Faz a alteração pedida e DEVOLVE o caso para o dono original
                             payload_edicao = {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}
                             if api_user_id and dono_original != api_user_id:
                                 payload_edicao['OwnerId'] = dono_original
@@ -458,11 +465,9 @@ else:
                                 id_caso = row['ID do Caso']
                                 num_caso = row['Número']
                                 try:
-                                    # 1. MÁGICA: Puxa para a API (Simula o Aceitar que muda pra "Em Tratativa")
                                     if api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # 2. Transfere para o dono final e FORÇA o status "Em Aberto" de volta
                                     sf.Case.update(id_caso, {'OwnerId': novo_id, 'Status': 'Em Aberto'}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                     sucessos += 1
                                 except Exception as e:
