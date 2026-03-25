@@ -98,11 +98,12 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # Adicionado OwnerId na query para conseguirmos devolver a posse após uma edição na tabela
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
-        Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, Owner.Name, 
+        Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, OwnerId, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones)
     FROM Case 
     WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)))
@@ -148,6 +149,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         
         linhas.append({
             'ID do Caso': record['Id'],
+            'ID do Proprietário': record['OwnerId'],
             'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
             'Número': record['CaseNumber'],
             'Abertura': data_abertura,
@@ -239,7 +241,7 @@ if periodo_selecionado == "Personalizado":
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados)
 lista_proprietarios = get_owner_options()
-api_user_id = get_api_user_id() # Pega o ID da API para fazer o Bypass de segurança
+api_user_id = get_api_user_id()
 
 # --- ORDENAÇÃO DAS FILAS ---
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
@@ -365,7 +367,7 @@ else:
             def to_excel(df_export):
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_temp = df_export.drop(columns=['Selecionar']).copy()
+                    df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário']).copy() # Oculta o OwnerId do Excel
                     df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
                     if df_temp['Fechamento'].notna().any():
                         df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
@@ -391,6 +393,7 @@ else:
             column_config={
                 "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
                 "ID do Caso": None, 
+                "ID do Proprietário": None, # Esconde a coluna técnica
                 "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
                 "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
                 "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
@@ -403,7 +406,7 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES (COM AUTO-ACEITAR) ---
+        # --- SALVAR ALTERAÇÕES (COM AUTO-ACEITAR BLINDADO) ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
@@ -412,11 +415,18 @@ else:
                     try:
                         for _, row in df_alteracoes.iterrows():
                             id_caso = row['ID do Caso']
-                            # 1. MÁGICA: Puxa para a API (Aceita o caso burlando a regra)
-                            if api_user_id:
+                            dono_original = row['ID do Proprietário']
+                            
+                            # 1. MÁGICA: Puxa para a API (Burla a regra)
+                            if api_user_id and dono_original != api_user_id:
                                 sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                            # 2. Faz a alteração de fato
-                            sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                
+                            # 2. Faz a alteração pedida e DEVOLVE o caso para o dono original
+                            payload_edicao = {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}
+                            if api_user_id and dono_original != api_user_id:
+                                payload_edicao['OwnerId'] = dono_original
+                                
+                            sf.Case.update(id_caso, payload_edicao, headers={'Sforce-Auto-Assign': 'FALSE'})
                             
                         st.success("Alterações salvas com sucesso!")
                         st.cache_data.clear()
@@ -448,12 +458,12 @@ else:
                                 id_caso = row['ID do Caso']
                                 num_caso = row['Número']
                                 try:
-                                    # 1. MÁGICA: Puxa para a API (Simula o Aceitar)
+                                    # 1. MÁGICA: Puxa para a API (Simula o Aceitar que muda pra "Em Tratativa")
                                     if api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # 2. Transfere para o dono final
-                                    sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    # 2. Transfere para o dono final e FORÇA o status "Em Aberto" de volta
+                                    sf.Case.update(id_caso, {'OwnerId': novo_id, 'Status': 'Em Aberto'}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                     sucessos += 1
                                 except Exception as e:
                                     msg_erro = str(e)
