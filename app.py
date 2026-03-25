@@ -57,6 +57,16 @@ def init_connection():
 sf = init_connection()
 
 # --- FUNÇÕES DE BUSCA ---
+@st.cache_data(ttl=86400) # Cache por 1 dia
+def get_api_user_id():
+    """Descobre o ID do usuário logado na API para forçar o 'Aceitar'"""
+    sf_conn = init_connection()
+    try:
+        username_api = st.secrets["sf_username"]
+        return sf_conn.query(f"SELECT Id FROM User WHERE Username = '{username_api}'")['records'][0]['Id']
+    except:
+        return None
+
 @st.cache_data(ttl=3600, show_spinner="Atualizando lista de proprietários...") 
 def get_owner_options():
     sf_conn = init_connection()
@@ -227,10 +237,9 @@ if periodo_selecionado == "Personalizado":
         st.stop()
 
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
-
-# Carrega os dados (com as novas mensagens de spinner)
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados)
 lista_proprietarios = get_owner_options()
+api_user_id = get_api_user_id() # Pega o ID da API para fazer o Bypass de segurança
 
 # --- ORDENAÇÃO DAS FILAS ---
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
@@ -375,7 +384,6 @@ else:
         def colorir_linha(row):
             return ['background-color: #ffebee' if row['SLA Atrasado'] == '🔴 Atrasado' else 'background-color: #ffffff' for _ in row]
 
-        # Deixando Status e Motivo liberados para edição
         colunas_bloqueadas = df_view.columns.drop(['Selecionar', 'Status', 'Motivo']).tolist()
 
         edited_df = st.data_editor(
@@ -395,15 +403,21 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES (STATUS/MOTIVO) ---
+        # --- SALVAR ALTERAÇÕES (COM AUTO-ACEITAR) ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
             if st.button("💾 Salvar Alterações no Salesforce", type="primary"):
                 with st.spinner("Atualizando registros..."):
-                    payload = [{'Id': row['ID do Caso'], 'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']} for _, row in df_alteracoes.iterrows()]
                     try:
-                        sf.bulk.Case.update(payload)
+                        for _, row in df_alteracoes.iterrows():
+                            id_caso = row['ID do Caso']
+                            # 1. MÁGICA: Puxa para a API (Aceita o caso burlando a regra)
+                            if api_user_id:
+                                sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                            # 2. Faz a alteração de fato
+                            sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                            
                         st.success("Alterações salvas com sucesso!")
                         st.cache_data.clear()
                         st.rerun()
@@ -434,7 +448,11 @@ else:
                                 id_caso = row['ID do Caso']
                                 num_caso = row['Número']
                                 try:
-                                    # CORREÇÃO: Bypass nas Regras de Atribuição
+                                    # 1. MÁGICA: Puxa para a API (Simula o Aceitar)
+                                    if api_user_id:
+                                        sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                        
+                                    # 2. Transfere para o dono final
                                     sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                     sucessos += 1
                                 except Exception as e:
