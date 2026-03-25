@@ -14,7 +14,6 @@ st.markdown("""
     <style>
     .stApp { background-color: #ffffff !important; }
     
-    /* CORREÇÃO DA BARRA LATERAL: Fundo transparente em vez de invisível */
     header { background-color: transparent !important; }
     
     #MainMenu { visibility: hidden !important; display: none !important; }
@@ -132,9 +131,11 @@ def get_owner_options(username, _pwd, _token):
         
     return dict(sorted(opcoes.items()))
 
-@st.cache_data(ttl=1800, show_spinner="Sincronizando casos com o Salesforce. Isso pode levar alguns segundos...") 
+# Desligamos o spinner padrão (show_spinner=False) para usar a nossa Barra de Progresso Real
+@st.cache_data(ttl=1800, show_spinner=False) 
 def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username, _pwd, _token):
     sf_conn = init_connection(username, _pwd, _token)
+    
     if periodo_selecionado == "Personalizado" and dt_inicio and dt_fim:
         inicio_str = dt_inicio.strftime('%Y-%m-%dT00:00:00Z')
         fim_str = dt_fim.strftime('%Y-%m-%dT23:59:59Z')
@@ -150,7 +151,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # CORREÇÃO: A "Rede de Arrastão" para capturar a fila genérica independentemente de acentos ou tipos
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
@@ -167,99 +167,135 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
       AND {filtro_data}
       {filtro_status}
     """
-    result = sf_conn.query_all(query)
-    sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
     
-    linhas = []
-    hoje_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    # --- INÍCIO DA BARRA DE PROGRESSO ---
+    my_bar = st.progress(0, text="Iniciando sincronização com o Salesforce...")
     
-    for record in result['records']:
-        dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
+    try:
+        # Pede a primeira "página" de dados e o total
+        result = sf_conn.query(query)
+        total_records = result.get('totalSize', 0)
+        records = result.get('records', [])
         
-        filas_conhecidas = [
-            "ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
-            "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
-        ]
+        if total_records > 0:
+            current_len = len(records)
+            percent = int((current_len / total_records) * 40) # O Download vale 40% da barra
+            my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
+
+            # Loop de Paginação (busca de 2.000 em 2.000)
+            while not result.get('done', True):
+                result = sf_conn.query_more(result['nextRecordsUrl'], True)
+                records.extend(result.get('records', []))
+                current_len = len(records)
+                percent = int((current_len / total_records) * 40)
+                my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
+
+        my_bar.progress(40, text="Download concluído! Estruturando inteligência de dados...")
+
+        linhas = []
+        hoje_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        total_processar = len(records)
         
-        # CORREÇÃO DA IDENTIFICAÇÃO DA FILA GENÉRICA
-        if "SAFETY" in dono_upper:
-            fila_principal = "SAFETY"
-            subfila = dono_upper
-        elif "GENÉRICO" in dono_upper or "GENERICO" in dono_upper or "SEM FILA" in dono_upper:
-            fila_principal = "CASOS SEM FILA - GENÉRICO"
-            subfila = dono_upper
-        elif dono_upper in filas_conhecidas:
-            fila_principal = dono_upper
-            subfila = "-"
-        elif dono_upper.startswith("CARTEIRA"):
-            fila_principal = "CORPORATIVO"
-            subfila = dono_upper
-        else:
-            fila_principal = "ATRIBUÍDO AO USUÁRIO"
-            subfila = dono_upper
+        for i, record in enumerate(records):
+            # Atualiza a barra durante o processamento a cada 500 registros para não travar a tela
+            if total_processar > 0 and i % 500 == 0:
+                progresso_atual = 40 + int((i / total_processar) * 60) # Processamento vale 60%
+                my_bar.progress(progresso_atual, text=f"Estruturando dados visuais... {progresso_atual}%")
+
+            dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
             
-        macro_status = "🟢 Fechado" if record['Status'] in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
-        sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
-        
-        data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
-        data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
-        
-        fim_calc = data_fechamento if data_fechamento else hoje_utc
-        idade_dias = (fim_calc - data_abertura).days
-        
-        classificacao = '-'
-        if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
-            classificacao = record['Account']['FOZ_Classificacao__c']
+            filas_conhecidas = [
+                "ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
+                "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
+            ]
             
-        desc_oficial = record.get('Description')
-        historico_comentarios = ""
-        
-        if record.get('CaseComments') and record['CaseComments'].get('records'):
-            for comment in record['CaseComments']['records']:
-                autor = comment['CreatedBy']['Name'] if comment.get('CreatedBy') else 'Usuário'
-                texto = comment['CommentBody']
-                try:
-                    dt_obj = pd.to_datetime(comment['CreatedDate']).tz_convert(fuso_br)
-                    data_str = dt_obj.strftime('%d/%m/%Y %H:%M')
-                except:
-                    data_str = comment['CreatedDate']
-                    
-                historico_comentarios += f"🗣️ {autor} em {data_str}:\n{texto}\n\n"
-        
-        if desc_oficial and historico_comentarios:
-            descricao_final = f"📝 DESCRIÇÃO ORIGINAL:\n{desc_oficial}\n\n{'-'*40}\n\n💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
-        elif historico_comentarios:
-            descricao_final = f"💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
-        else:
-            descricao_final = desc_oficial if desc_oficial else "-"
+            if "SAFETY" in dono_upper:
+                fila_principal = "SAFETY"
+                subfila = dono_upper
+            elif "GENÉRICO" in dono_upper or "GENERICO" in dono_upper or "SEM FILA" in dono_upper:
+                fila_principal = "CASOS SEM FILA - GENÉRICO"
+                subfila = dono_upper
+            elif dono_upper in filas_conhecidas:
+                fila_principal = dono_upper
+                subfila = "-"
+            elif dono_upper.startswith("CARTEIRA"):
+                fila_principal = "CORPORATIVO"
+                subfila = dono_upper
+            else:
+                fila_principal = "ATRIBUÍDO AO USUÁRIO"
+                subfila = dono_upper
+                
+            macro_status = "🟢 Fechado" if record['Status'] in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
+            sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
             
-        linhas.append({
-            'ID do Caso': record['Id'],
-            'ID do Proprietário': record['OwnerId'],
-            'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
-            'Número': record['CaseNumber'],
-            'Status': record['Status'],
-            'Motivo': record['FOZ_Motivo__c'],
-            'Descrição': descricao_final,
-            'Fila Principal': fila_principal,
-            'Subfila': subfila,
-            'Macro Status': macro_status,
-            'Idade (Dias)': idade_dias,
-            'SLA Atrasado': '🔴 Atrasado' if sla_atrasado else '✅ No Prazo',
-            'Origem': record['Origin'],
-            'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
-            'Conta': record['Account']['Name'] if record['Account'] else '-',
-            'Abertura': data_abertura,
-            'Fechamento': data_fechamento
-        })
+            data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
+            data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
+            
+            fim_calc = data_fechamento if data_fechamento else hoje_utc
+            idade_dias = (fim_calc - data_abertura).days
+            
+            classificacao = '-'
+            if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
+                classificacao = record['Account']['FOZ_Classificacao__c']
+                
+            desc_oficial = record.get('Description')
+            historico_comentarios = ""
+            
+            if record.get('CaseComments') and record['CaseComments'].get('records'):
+                for comment in record['CaseComments']['records']:
+                    autor = comment['CreatedBy']['Name'] if comment.get('CreatedBy') else 'Usuário'
+                    texto = comment['CommentBody']
+                    try:
+                        dt_obj = pd.to_datetime(comment['CreatedDate']).tz_convert(fuso_br)
+                        data_str = dt_obj.strftime('%d/%m/%Y %H:%M')
+                    except:
+                        data_str = comment['CreatedDate']
+                        
+                    historico_comentarios += f"🗣️ {autor} em {data_str}:\n{texto}\n\n"
+            
+            if desc_oficial and historico_comentarios:
+                descricao_final = f"📝 DESCRIÇÃO ORIGINAL:\n{desc_oficial}\n\n{'-'*40}\n\n💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
+            elif historico_comentarios:
+                descricao_final = f"💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
+            else:
+                descricao_final = desc_oficial if desc_oficial else "-"
+                
+            linhas.append({
+                'ID do Caso': record['Id'],
+                'ID do Proprietário': record['OwnerId'],
+                'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
+                'Número': record['CaseNumber'],
+                'Status': record['Status'],
+                'Motivo': record['FOZ_Motivo__c'],
+                'Descrição': descricao_final,
+                'Fila Principal': fila_principal,
+                'Subfila': subfila,
+                'Macro Status': macro_status,
+                'Idade (Dias)': idade_dias,
+                'SLA Atrasado': '🔴 Atrasado' if sla_atrasado else '✅ No Prazo',
+                'Origem': record['Origin'],
+                'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
+                'Conta': record['Account']['Name'] if record['Account'] else '-',
+                'Abertura': data_abertura,
+                'Fechamento': data_fechamento
+            })
+            
+        df_final = pd.DataFrame(linhas)
         
-    df_final = pd.DataFrame(linhas)
-    
-    if not df_final.empty:
-        df_final['Abertura'] = pd.to_datetime(df_final['Abertura'])
-        df_final['Fechamento'] = pd.to_datetime(df_final['Fechamento'])
+        if not df_final.empty:
+            df_final['Abertura'] = pd.to_datetime(df_final['Abertura'])
+            df_final['Fechamento'] = pd.to_datetime(df_final['Fechamento'])
         
-    return df_final
+        my_bar.progress(100, text="✅ Sincronização e Processamento finalizados!")
+        time.sleep(0.5)
+        my_bar.empty() # Remove a barra da tela após carregar tudo
+        
+        return df_final
+
+    except Exception as e:
+        my_bar.empty()
+        st.error(f"Erro de comunicação com o Salesforce: {e}")
+        return pd.DataFrame()
 
 # --- FUNÇÃO PARA DESENHAR O CARD QUADRADO ---
 def desenhar_card(fila_nome, df_fila):
@@ -296,7 +332,7 @@ except Exception:
 st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
-# Busca Global adicionada à Sidebar
+# Busca Global
 busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
 
 st.markdown("""
@@ -483,7 +519,6 @@ else:
 
     # === ABA 2: EXTRATO E AÇÕES EM MASSA ===
     with tab2:
-        # CONGELAMENTO DE COLUNAS (Reordenação Estratégica)
         colunas_ordem_ideal = [
             'Número', 'Status', 'Motivo', 'Link Salesforce', 'Descrição', 
             'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'SLA Atrasado',
@@ -645,11 +680,11 @@ else:
             with c_followup:
                 st.markdown("##### 🔔 Criar Follow-up")
                 user_followup = st.selectbox("Notificar / Atribuir para:", [""] + list(lista_proprietarios.keys()), key="fup_user")
-                assunto_followup = st.text_input("Assunto da Tarefa:")
+                descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=68)
                 
                 if st.button("Criar Tarefa", use_container_width=True):
-                    if not user_followup or not assunto_followup.strip():
-                        st.warning("Selecione um usuário e digite o assunto.")
+                    if not user_followup or not descricao_followup.strip():
+                        st.warning("Selecione um usuário e digite a descrição da tarefa.")
                     else:
                         with st.spinner("Criando tarefas de follow-up..."):
                             try:
@@ -659,7 +694,8 @@ else:
                                     payload.append({
                                         'WhatId': row['ID do Caso'],
                                         'OwnerId': dono_id_tarefa,
-                                        'Subject': assunto_followup,
+                                        'Subject': 'Ação Requerida',
+                                        'Description': descricao_followup,
                                         'Status': 'Open',
                                         'Priority': 'Normal'
                                     })
