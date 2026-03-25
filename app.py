@@ -13,7 +13,10 @@ st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar
 st.markdown("""
     <style>
     .stApp { background-color: #ffffff !important; }
-    header { visibility: hidden !important; height: 0px !important; display: none !important; }
+    
+    /* CORREÇÃO DA BARRA LATERAL: Fundo transparente em vez de invisível */
+    header { background-color: transparent !important; }
+    
     #MainMenu { visibility: hidden !important; display: none !important; }
     footer { visibility: hidden !important; display: none !important; }
     .block-container { padding-top: 1.5rem !important; padding-bottom: 1rem !important; }
@@ -147,7 +150,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # Correção SOQL: Adicionada a busca pela Fila Genérica independente de ter Type = OA
+    # CORREÇÃO: A "Rede de Arrastão" para capturar a fila genérica independentemente de acentos ou tipos
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
@@ -158,7 +161,9 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
     FROM Case 
     WHERE (Type = 'OA' 
            OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)) 
-           OR Owner.Name LIKE 'Casos sem fila - GEN%')
+           OR Owner.Name LIKE '%GENÉRICO%'
+           OR Owner.Name LIKE '%GENERICO%'
+           OR Owner.Name LIKE '%Casos sem fila%')
       AND {filtro_data}
       {filtro_status}
     """
@@ -176,10 +181,11 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
         ]
         
+        # CORREÇÃO DA IDENTIFICAÇÃO DA FILA GENÉRICA
         if "SAFETY" in dono_upper:
             fila_principal = "SAFETY"
             subfila = dono_upper
-        elif "CASOS SEM FILA - GEN" in dono_upper:
+        elif "GENÉRICO" in dono_upper or "GENERICO" in dono_upper or "SEM FILA" in dono_upper:
             fila_principal = "CASOS SEM FILA - GENÉRICO"
             subfila = dono_upper
         elif dono_upper in filas_conhecidas:
@@ -553,7 +559,7 @@ else:
                                     sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
                             st.toast("✅ Alterações salvas com sucesso no Salesforce!")
-                            time.sleep(2)
+                            time.sleep(1.5)
                             st.cache_data.clear()
                             st.rerun()
                         except Exception as e:
@@ -611,7 +617,7 @@ else:
                                 for err in erros: st.warning(err)
                             if sucessos > 0:
                                 st.toast(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
-                                time.sleep(2)
+                                time.sleep(1.5)
                                 st.cache_data.clear() 
                                 st.rerun() 
 
@@ -627,7 +633,7 @@ else:
                                 payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados.iterrows()]
                                 sf.bulk.CaseComment.insert(payload)
                                 st.toast("✅ Comentários inseridos com sucesso!")
-                                time.sleep(2)
+                                time.sleep(1.5)
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
@@ -635,7 +641,7 @@ else:
                     else:
                         st.warning("O comentário não pode estar vazio.")
 
-            # --- 3. CRIAR FOLLOW-UP (NOVO) ---
+            # --- 3. CRIAR FOLLOW-UP ---
             with c_followup:
                 st.markdown("##### 🔔 Criar Follow-up")
                 user_followup = st.selectbox("Notificar / Atribuir para:", [""] + list(lista_proprietarios.keys()), key="fup_user")
@@ -651,15 +657,15 @@ else:
                                 payload = []
                                 for _, row in casos_selecionados.iterrows():
                                     payload.append({
-                                        'WhatId': row['ID do Caso'],  # Vincula a tarefa ao caso
-                                        'OwnerId': dono_id_tarefa,    # Quem será notificado
+                                        'WhatId': row['ID do Caso'],
+                                        'OwnerId': dono_id_tarefa,
                                         'Subject': assunto_followup,
                                         'Status': 'Open',
                                         'Priority': 'Normal'
                                     })
                                 sf.bulk.Task.insert(payload)
                                 st.toast("✅ Tarefas de Follow-up criadas com sucesso!")
-                                time.sleep(2)
+                                time.sleep(1.5)
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
