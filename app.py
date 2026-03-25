@@ -14,6 +14,7 @@ st.markdown("""
     <style>
     .stApp { background-color: #ffffff !important; }
     
+    /* CORREÇÃO DA BARRA LATERAL: Fundo transparente em vez de invisível */
     header { background-color: transparent !important; }
     
     #MainMenu { visibility: hidden !important; display: none !important; }
@@ -131,7 +132,6 @@ def get_owner_options(username, _pwd, _token):
         
     return dict(sorted(opcoes.items()))
 
-# Desligamos o spinner padrão (show_spinner=False) para usar a nossa Barra de Progresso Real
 @st.cache_data(ttl=1800, show_spinner=False) 
 def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username, _pwd, _token):
     sf_conn = init_connection(username, _pwd, _token)
@@ -168,21 +168,22 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
       {filtro_status}
     """
     
+    # CORREÇÃO AQUI: URL Base voltou pro código!
+    sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
+    
     # --- INÍCIO DA BARRA DE PROGRESSO ---
     my_bar = st.progress(0, text="Iniciando sincronização com o Salesforce...")
     
     try:
-        # Pede a primeira "página" de dados e o total
         result = sf_conn.query(query)
         total_records = result.get('totalSize', 0)
         records = result.get('records', [])
         
         if total_records > 0:
             current_len = len(records)
-            percent = int((current_len / total_records) * 40) # O Download vale 40% da barra
+            percent = int((current_len / total_records) * 40)
             my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
 
-            # Loop de Paginação (busca de 2.000 em 2.000)
             while not result.get('done', True):
                 result = sf_conn.query_more(result['nextRecordsUrl'], True)
                 records.extend(result.get('records', []))
@@ -197,9 +198,8 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         total_processar = len(records)
         
         for i, record in enumerate(records):
-            # Atualiza a barra durante o processamento a cada 500 registros para não travar a tela
             if total_processar > 0 and i % 500 == 0:
-                progresso_atual = 40 + int((i / total_processar) * 60) # Processamento vale 60%
+                progresso_atual = 40 + int((i / total_processar) * 60)
                 my_bar.progress(progresso_atual, text=f"Estruturando dados visuais... {progresso_atual}%")
 
             dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
@@ -288,7 +288,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         
         my_bar.progress(100, text="✅ Sincronização e Processamento finalizados!")
         time.sleep(0.5)
-        my_bar.empty() # Remove a barra da tela após carregar tudo
+        my_bar.empty()
         
         return df_final
 
