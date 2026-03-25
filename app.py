@@ -100,13 +100,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # A subquery agora puxa CommentBody, CreatedBy.Name e CreatedDate
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
         Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, OwnerId, Owner.Name, 
         (SELECT IsViolated FROM CaseMilestones),
-        (SELECT CommentBody FROM CaseComments ORDER BY CreatedDate ASC LIMIT 1)
+        (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
     FROM Case 
     WHERE (Type = 'OA' OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)))
       AND {filtro_data}
@@ -126,7 +127,11 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
             "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
         ]
         
-        if dono_upper in filas_conhecidas:
+        # --- NOVO: INTERCEPTAÇÃO DA FILA SAFETY ---
+        if "SAFETY" in dono_upper:
+            fila_principal = "SAFETY"
+            subfila = dono_upper
+        elif dono_upper in filas_conhecidas:
             fila_principal = dono_upper
             subfila = "-"
         elif dono_upper.startswith("CARTEIRA"):
@@ -149,13 +154,31 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados):
         if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
             classificacao = record['Account']['FOZ_Classificacao__c']
             
+        # --- NOVO: HISTÓRICO COMPLETO DE COMENTÁRIOS COM AUTOR E DATA ---
         desc_oficial = record.get('Description')
-        comentario_inicial = ""
-        if record.get('CaseComments') and record['CaseComments'].get('records'):
-            comentario_inicial = record['CaseComments']['records'][0]['CommentBody']
-            
-        descricao_final = desc_oficial if desc_oficial else comentario_inicial
+        historico_comentarios = ""
         
+        if record.get('CaseComments') and record['CaseComments'].get('records'):
+            for comment in record['CaseComments']['records']:
+                autor = comment['CreatedBy']['Name'] if comment.get('CreatedBy') else 'Usuário'
+                texto = comment['CommentBody']
+                try:
+                    # Tenta formatar a data do comentário para o padrão Brasileiro
+                    dt_obj = pd.to_datetime(comment['CreatedDate']).tz_convert(fuso_br)
+                    data_str = dt_obj.strftime('%d/%m/%Y %H:%M')
+                except:
+                    data_str = comment['CreatedDate']
+                    
+                historico_comentarios += f"🗣️ {autor} em {data_str}:\n{texto}\n\n"
+        
+        # Junta a descrição oficial com os comentários em um texto único e formatado
+        if desc_oficial and historico_comentarios:
+            descricao_final = f"📝 DESCRIÇÃO ORIGINAL:\n{desc_oficial}\n\n{'-'*40}\n\n💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
+        elif historico_comentarios:
+            descricao_final = f"💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
+        else:
+            descricao_final = desc_oficial if desc_oficial else "-"
+            
         linhas.append({
             'ID do Caso': record['Id'],
             'ID do Proprietário': record['OwnerId'],
@@ -197,8 +220,11 @@ def desenhar_card(fila_nome, df_fila):
     
     cor_atraso = "#d9534f" if atr > 0 else "#555555"
     
+    # Destaca visualmente o card de Safety
+    borda_destaque = "border-top: 4px solid #d9534f;" if fila_nome == "SAFETY" else ""
+    
     html_card = f"""
-    <div style="background-color: white; border: 1px solid #dce1e6; border-radius: 8px 8px 0px 0px; padding: 15px; height: 145px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: space-between;">
+    <div style="background-color: white; border: 1px solid #dce1e6; border-radius: 8px 8px 0px 0px; padding: 15px; height: 145px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: space-between; {borda_destaque}">
         <h4 style="margin: 0; padding: 0; color: #0c1c2b; font-size: 15px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px;">{fila_nome}</h4>
         <div style="font-size: 13px; color: #495057; line-height: 1.6; margin-top: 10px;">
             <div style="display: flex; justify-content: space-between;"><span>Casos:</span> <b>{vol}</b></div>
@@ -300,9 +326,9 @@ else:
     # --- SISTEMA DE FILTROS DINÂMICOS NA VISÃO DE DETALHE ---
     col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
     
-    # Filtro 1: Subfila (Carteira ou Usuário) - Só aparece nas filas que fazem sentido
+    # Filtro 1: Subfila (Carteira, Usuário ou Safety)
     with col_f1:
-        if fila_atual in ["CORPORATIVO", "ATRIBUÍDO AO USUÁRIO"]:
+        if fila_atual in ["CORPORATIVO", "ATRIBUÍDO AO USUÁRIO", "SAFETY"]:
             label_filtro = "📌 Filtrar Carteira:" if fila_atual == "CORPORATIVO" else "👤 Filtrar Usuário:"
             subfilas_disp = sorted(df_view['Subfila'].dropna().unique().tolist())
             subfila_sel = st.selectbox(label_filtro, ["Todos"] + subfilas_disp)
@@ -310,7 +336,7 @@ else:
             if subfila_sel != "Todos":
                 df_view = df_view[df_view['Subfila'] == subfila_sel]
         else:
-            st.empty() # Mantém o layout alinhado
+            st.empty() 
 
     # Filtro 2: Status (Aparece em TODAS as filas)
     with col_f2:
