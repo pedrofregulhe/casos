@@ -5,10 +5,6 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
 
-# --- CONFIGURAÇÃO DE STATUS DO SALESFORCE ---
-# Confirme o Nome da API do Status quando o caso é aceito
-STATUS_API_ACEITO = 'Em Tratativa' 
-
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
 
@@ -424,28 +420,31 @@ else:
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
             if st.button("💾 Salvar Alterações no Salesforce", type="primary"):
-                with st.spinner("Atualizando registros..."):
-                    try:
-                        for _, row in df_alteracoes.iterrows():
-                            id_caso = row['ID do Caso']
-                            dono_original = row['ID do Proprietário']
-                            
-                            # PASSO 1: Aceita o caso (Toma posse e força o status "Em Tratativa")
-                            if api_user_id and dono_original != api_user_id:
-                                sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': STATUS_API_ACEITO}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                if api_user_id is None:
+                    st.error("Erro: Não foi possível identificar o usuário da API para realizar a alteração de propriedade.")
+                else:
+                    with st.spinner("Atualizando registros..."):
+                        try:
+                            for _, row in df_alteracoes.iterrows():
+                                id_caso = row['ID do Caso']
+                                dono_original = row['ID do Proprietário']
                                 
-                            # PASSO 2: Aplica as edições manuais
-                            sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                            
-                            # PASSO 3: Devolve a posse para a fila/dono original
-                            if api_user_id and dono_original != api_user_id:
-                                sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                            
-                        st.success("Alterações salvas com sucesso!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao salvar alterações: {e}")
+                                # PASSO 1: Toma posse do caso enviando APENAS o OwnerId
+                                if dono_original != api_user_id:
+                                    sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    
+                                # PASSO 2: Aplica as edições solicitadas pelo usuário (Status / Motivo)
+                                sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                
+                                # PASSO 3: Devolve a posse para a fila/dono original
+                                if dono_original != api_user_id:
+                                    sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                
+                            st.success("Alterações salvas com sucesso!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao salvar alterações: {e}")
 
         st.markdown("---")
 
@@ -461,7 +460,11 @@ else:
                 dono_selecionado = st.selectbox("Selecione o Novo Proprietário:", [""] + list(lista_proprietarios.keys()))
                 
                 if st.button("Confirmar Transferência", use_container_width=True):
-                    if dono_selecionado:
+                    if not dono_selecionado:
+                        st.warning("Por favor, selecione um proprietário.")
+                    elif api_user_id is None:
+                        st.error("Erro: Não foi possível identificar o usuário da API. Verifique o sf_username no arquivo secrets.")
+                    else:
                         with st.spinner("Transferindo casos no Salesforce..."):
                             novo_id = lista_proprietarios[dono_selecionado]
                             sucessos = 0
@@ -473,11 +476,11 @@ else:
                                 dono_original = row['ID do Proprietário']
                                 
                                 try:
-                                    # PASSO 1: Aceita o caso (Toma posse e altera status para Em Tratativa)
-                                    if api_user_id and dono_original != api_user_id:
-                                        sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': STATUS_API_ACEITO}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    # PASSO 1: Toma posse do caso enviando APENAS o OwnerId
+                                    if dono_original != api_user_id:
+                                        sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # PASSO 2: Transfere para a fila final (SEM MEXER NO STATUS!)
+                                    # PASSO 2: Transfere para a fila final enviando APENAS o OwnerId
                                     if novo_id != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
@@ -501,8 +504,6 @@ else:
                                 time.sleep(4) 
                                 st.cache_data.clear() 
                                 st.rerun() 
-                    else:
-                        st.warning("Por favor, selecione um proprietário.")
 
             with c_coment:
                 st.markdown("##### 💬 Comentar em Lote")
