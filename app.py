@@ -5,6 +5,10 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
 
+# --- CONFIGURAÇÃO DE STATUS DO SALESFORCE ---
+# Confirme o Nome da API do Status quando o caso é aceito
+STATUS_API_ACEITO = 'Em Tratativa' 
+
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
 
@@ -57,9 +61,8 @@ def init_connection():
 sf = init_connection()
 
 # --- FUNÇÕES DE BUSCA ---
-@st.cache_data(ttl=86400) # Cache por 1 dia
+@st.cache_data(ttl=86400)
 def get_api_user_id():
-    """Descobre o ID do usuário logado na API para forçar o 'Aceitar'"""
     sf_conn = init_connection()
     try:
         username_api = st.secrets["sf_username"]
@@ -416,7 +419,7 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES DA TABELA (SIMULANDO BOTÃO ACEITAR) ---
+        # --- SALVAR ALTERAÇÕES DA TABELA ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
@@ -427,14 +430,14 @@ else:
                             id_caso = row['ID do Caso']
                             dono_original = row['ID do Proprietário']
                             
-                            # PASSO 1: Simula o clique exato no botão Aceitar
+                            # PASSO 1: Aceita o caso (Toma posse e força o status "Em Tratativa")
                             if api_user_id and dono_original != api_user_id:
-                                sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': 'Em Tratativa'}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': STATUS_API_ACEITO}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                 
-                            # PASSO 2: Aplica as edições do usuário
+                            # PASSO 2: Aplica as edições manuais
                             sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
                             
-                            # PASSO 3: Devolve o caso
+                            # PASSO 3: Devolve a posse para a fila/dono original
                             if api_user_id and dono_original != api_user_id:
                                 sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                             
@@ -446,7 +449,7 @@ else:
 
         st.markdown("---")
 
-        # --- TRANSFERÊNCIA E COMENTÁRIOS (SIMULANDO BOTÃO ACEITAR) ---
+        # --- TRANSFERÊNCIA E COMENTÁRIOS ---
         casos_selecionados = edited_df[edited_df['Selecionar'] == True]
         if not casos_selecionados.empty:
             st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para ações em massa:**")
@@ -470,11 +473,11 @@ else:
                                 dono_original = row['ID do Proprietário']
                                 
                                 try:
-                                    # PASSO 1: Simula o botão Aceitar (Owner = API_User E Status = Em Tratativa)
+                                    # PASSO 1: Aceita o caso (Toma posse e altera status para Em Tratativa)
                                     if api_user_id and dono_original != api_user_id:
-                                        sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': 'Em Tratativa'}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                        sf.Case.update(id_caso, {'OwnerId': api_user_id, 'Status': STATUS_API_ACEITO}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    # PASSO 2: Transfere para a nova fila final
+                                    # PASSO 2: Transfere para a fila final (SEM MEXER NO STATUS!)
                                     if novo_id != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
