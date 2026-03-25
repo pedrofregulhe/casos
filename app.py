@@ -297,13 +297,30 @@ else:
     
     df_view = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
     
-    if fila_atual == "CORPORATIVO":
-        carteiras_disp = sorted(df_view['Subfila'].unique().tolist())
-        col_f, _ = st.columns([1, 3])
-        with col_f:
-            cart_sel = st.selectbox("📌 Filtrar Carteira Específica:", ["Todas"] + carteiras_disp)
-        if cart_sel != "Todas":
-            df_view = df_view[df_view['Subfila'] == cart_sel]
+    # --- SISTEMA DE FILTROS DINÂMICOS NA VISÃO DE DETALHE ---
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
+    
+    # Filtro 1: Subfila (Carteira ou Usuário) - Só aparece nas filas que fazem sentido
+    with col_f1:
+        if fila_atual in ["CORPORATIVO", "ATRIBUÍDO AO USUÁRIO"]:
+            label_filtro = "📌 Filtrar Carteira:" if fila_atual == "CORPORATIVO" else "👤 Filtrar Usuário:"
+            subfilas_disp = sorted(df_view['Subfila'].dropna().unique().tolist())
+            subfila_sel = st.selectbox(label_filtro, ["Todos"] + subfilas_disp)
+            
+            if subfila_sel != "Todos":
+                df_view = df_view[df_view['Subfila'] == subfila_sel]
+        else:
+            st.empty() # Mantém o layout alinhado
+
+    # Filtro 2: Status (Aparece em TODAS as filas)
+    with col_f2:
+        status_disp = sorted(df_view['Status'].dropna().unique().tolist())
+        status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
+        
+        if status_sel != "Todos":
+            df_view = df_view[df_view['Status'] == status_sel]
+            
+    st.markdown("<br>", unsafe_allow_html=True)
             
     # --- SISTEMA DE ABAS ---
     tab1, tab2 = st.tabs(["📊 Indicadores Operacionais", "🛠️ Ações em Massa & Extrato"])
@@ -358,14 +375,17 @@ else:
                 fig_age.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_age, use_container_width=True)
             else:
-                st.info("Nenhum caso em aberto no momento para a faixa selecionada.")
+                st.info("Nenhum caso em aberto no momento para o filtro selecionado.")
                 
         with c2:
             df_sla = df_view['SLA Atrasado'].value_counts().reset_index()
-            fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Saúde do SLA (Total)', 
-                             color='SLA Atrasado', color_discrete_map={'✅ No Prazo':'#00CC96', '🔴 Atrasado':'#EF553B'})
-            fig_sla.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_sla, use_container_width=True)
+            if not df_sla.empty:
+                fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Saúde do SLA (Total)', 
+                                 color='SLA Atrasado', color_discrete_map={'✅ No Prazo':'#00CC96', '🔴 Atrasado':'#EF553B'})
+                fig_sla.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_sla, use_container_width=True)
+            else:
+                st.info("Nenhum dado de SLA para exibir neste filtro.")
 
     # === ABA 2: EXTRATO E AÇÕES EM MASSA ===
     with tab2:
