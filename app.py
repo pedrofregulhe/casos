@@ -351,7 +351,54 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
 # --- FUNÇÕES DE MODAIS (POP-UPS) ---
 
-# 1. MODAL TRANSFERIR
+# 1. NOVO MODAL: RESUMO DIÁRIO
+@st.dialog("📄 Resumo Diário da Operação")
+def modal_resumo_diario(df_dados):
+    if df_dados.empty:
+        st.warning("Não há dados para resumir. Verifique os filtros de período.")
+        return
+        
+    hoje_str = datetime.now(fuso_br).strftime("%d/%m/%Y às %H:%M")
+    
+    # Cálculos Gerais
+    vol_total = len(df_dados)
+    trat_total = len(df_dados[df_dados['Macro Status'] == '🟡 Em Tratativa'])
+    fech_total = len(df_dados[df_dados['Macro Status'] == '🟢 Fechado'])
+    atr_total = len(df_dados[(df_dados['SLA Macro'] == '🔴 Atrasado') & (df_dados['Macro Status'] == '🟡 Em Tratativa')])
+    
+    resumo = f"📊 *STATUS DA OPERAÇÃO - Atualizado em {hoje_str}*\n\n"
+    resumo += f"📈 *VISÃO GERAL*\n"
+    resumo += f"▪️ Total de Casos (Período): {vol_total}\n"
+    resumo += f"▪️ Casos Abertos / Em Tratativa: {trat_total}\n"
+    resumo += f"▪️ Casos Fechados: {fech_total}\n"
+    resumo += f"▪️ SLA Atrasado (Em Aberto): {atr_total}\n\n"
+    
+    resumo += f"🏢 *DETALHAMENTO POR FILA*\n"
+    
+    # Agrupa por Fila Principal (removendo "ATRIBUÍDO AO USUÁRIO" da conta visual se quiser, ou mantendo)
+    filas = sorted(df_dados['Fila Principal'].dropna().unique().tolist())
+    
+    for fila in filas:
+        df_fila = df_dados[df_dados['Fila Principal'] == fila]
+        vol = len(df_fila)
+        trat = len(df_fila[df_fila['Macro Status'] == '🟡 Em Tratativa'])
+        fech = len(df_fila[df_fila['Macro Status'] == '🟢 Fechado'])
+        atr = len(df_fila[(df_fila['SLA Macro'] == '🔴 Atrasado') & (df_fila['Macro Status'] == '🟡 Em Tratativa')])
+        
+        df_fech = df_fila[df_fila['Macro Status'] == '🟢 Fechado']
+        tma_str = "N/A"
+        if not df_fech.empty:
+            tma_dias = (df_fech['Fechamento'] - df_fech['Abertura']).dt.total_seconds().mean() / (24 * 3600)
+            tma_str = f"{tma_dias:.1f} dias"
+            
+        resumo += f"\n🔹 *{fila}*\n"
+        resumo += f"   Total: {vol} | Abertos: {trat} | Fechados: {fech}\n"
+        resumo += f"   SLA Atrasado: {atr} | TMA Médio: {tma_str}\n"
+
+    st.markdown("💡 **Clique no ícone de 'Copiar'** no canto superior direito do quadro abaixo para copiar todo o texto formatado para o seu e-mail ou WhatsApp.")
+    st.code(resumo, language="markdown")
+
+# 2. MODAL TRANSFERIR E COMENTAR
 @st.dialog("🔄 Transferir e Comentar")
 def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
@@ -434,7 +481,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
-# 2. MODAL EDITAR CASOS
+# 3. MODAL EDITAR CASOS
 @st.dialog("📝 Editar Casos")
 def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
     st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
@@ -482,7 +529,7 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
-# 3. MODAL FOLLOW-UP
+# 4. MODAL FOLLOW-UP
 @st.dialog("🔔 Criar Tarefa de Follow-up")
 def modal_followup(casos_selecionados_df, lista_prop):
     st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
@@ -560,6 +607,12 @@ else:
     st.sidebar.caption("💡 Para habilitar a Atualização Automática, instale o pacote via terminal: `pip install streamlit-autorefresh`")
 
 st.sidebar.markdown("---")
+
+# AQUI ESTÁ O NOVO BOTÃO DE RESUMO!
+if st.sidebar.button("📄 Gerar Resumo Diário", type="primary", use_container_width=True):
+    # Passamos o df_filtrado que contém os dados da tela principal
+    modal_resumo_diario(st.session_state.get('last_df', pd.DataFrame())) # Será atualizado abaixo
+
 busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
 
 st.markdown("""
@@ -568,7 +621,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-if st.sidebar.button("🔄 Sincronizar Agora", type="primary", use_container_width=True):
+if st.sidebar.button("🔄 Sincronizar Agora", use_container_width=True):
     st.cache_data.clear()
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
     st.rerun()
@@ -613,6 +666,9 @@ if busca_global and not df_filtrado.empty:
         df_filtrado['Conta'].astype(str).str.contains(busca_global, case=False, na=False)
     )
     df_filtrado = df_filtrado[mask]
+
+# Armazena na sessão para o botão de resumo funcionar independente da renderização sequencial
+st.session_state.last_df = df_filtrado.copy() if not df_filtrado.empty else pd.DataFrame()
 
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
 if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
