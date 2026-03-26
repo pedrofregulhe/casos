@@ -351,9 +351,50 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
 # --- FUNÇÕES DE MODAIS (POP-UPS) ---
 
+# 1. NOVO MODAL: ACEITAR CASOS
+@st.dialog("👍 Aceitar Casos (API)")
+def modal_aceitar_api(casos_selecionados_df, df_view, api_usr_id):
+    st.markdown(f"Tentando assumir a posse de **{len(casos_selecionados_df)} caso(s)** via API.")
+    st.info("💡 Para driblar o bloqueio do Salesforce, a API puxará a posse para você e alterará o Status simultaneamente.")
+    
+    opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
+    
+    # Campo para ajudar a driblar a trava de validação
+    status_aceite = st.selectbox("Qual o Status correto ao aceitar um caso?", ["Em Tratativa", "Em Andamento", "Aberto"] + opcoes_status)
+    
+    if st.button("Forçar Aceite no Salesforce", type="primary", use_container_width=True):
+        with st.spinner("Processando integração de posse..."):
+            sucessos = 0
+            erros = []
+            
+            for _, row in casos_selecionados_df.iterrows():
+                id_caso = row['ID do Caso']
+                num_caso = row['Número']
+                is_fechado = row['Status'] in ['Closed', 'Fechado']
+                
+                if is_fechado:
+                    erros.append(f"Caso {num_caso} ignorado: O Salesforce bloqueia aceitar casos Fechados.")
+                    continue
+                    
+                try:
+                    sf.Case.update(id_caso, {'OwnerId': api_usr_id, 'Status': status_aceite}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                    sucessos += 1
+                except Exception as e:
+                    erros.append(f"Caso {num_caso}: {str(e)}")
+                    
+            if erros:
+                for err in erros: st.error(err)
+            if sucessos > 0:
+                st.toast(f"✅ {sucessos} caso(s) aceito(s) com sucesso!")
+                time.sleep(1.5)
+                st.cache_data.clear()
+                st.rerun()
+
+# 2. MODAL TRANSFERIR
 @st.dialog("🔄 Transferir e Comentar")
 def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
+    st.caption("⚠️ Importante: Você já deve ter aceito os casos antes de transferi-los.")
     
     casos_com_basecorp = casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-']
     tem_basecorp = not casos_com_basecorp.empty
@@ -381,39 +422,18 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
             st.error("⚠️ Erro: Não foi possível identificar seu usuário da API.")
             return
             
-        with st.spinner("Processando atualizações de Posse e Transferência..."):
+        with st.spinner("Processando atualizações no Salesforce..."):
             sucessos = 0
             erros = []
-            casos_aceitos = []
             
-            # PASSO 1: ACEITAR (Toma Posse)
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
-                is_fechado = row['Status'] in ['Closed', 'Fechado']
                 
+                is_fechado = row['Status'] in ['Closed', 'Fechado']
                 if is_fechado:
                     erros.append(f"Caso {num_caso} ignorado: Salesforce bloqueia transferência de casos fechados.")
                     continue
-                    
-                try:
-                    sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    casos_aceitos.append(row)
-                except Exception as e:
-                    erros.append(f"Erro ao 'Aceitar' o caso {num_caso}: {str(e)}")
-                    
-            # PASSO 2: COMENTAR (Enquanto somos os donos oficiais)
-            if novo_comentario.strip() and casos_aceitos:
-                try:
-                    payload_coment = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for row in casos_aceitos]
-                    sf.bulk.CaseComment.insert(payload_coment)
-                except Exception as e:
-                    erros.append(f"Erro ao inserir comentários em lote: {str(e)}")
-                    
-            # PASSO 3: TRANSFERIR AO DESTINO
-            for row in casos_aceitos:
-                id_caso = row['ID do Caso']
-                num_caso = row['Número']
                 
                 novo_id = None
                 if modo_transferencia.startswith("Manual"):
@@ -429,28 +449,36 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                             novo_id = val
                             break
                     if not novo_id:
-                        erros.append(f"Caso {num_caso} ignorado: Carteira '{carteira_bc}' não achada.")
+                        erros.append(f"Caso {num_caso} ignorado: Carteira '{carteira_bc}' não achada no Salesforce.")
                         continue
-                        
-                if novo_id:
-                    try:
-                        if novo_id != api_usr_id:
-                            sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                        sucessos += 1
-                    except Exception as e:
-                        erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
+                
+                try:
+                    sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                    sucessos += 1
+                except Exception as e:
+                    erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
+            
+            if novo_comentario.strip() and sucessos > 0:
+                try:
+                    payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows() if row['Status'] not in ['Closed', 'Fechado']]
+                    if payload:
+                        sf.bulk.CaseComment.insert(payload)
+                except Exception as e:
+                    erros.append(f"Erro ao inserir comentários: {str(e)}")
             
             if erros:
                 for err in erros: st.error(err)
             if sucessos > 0:
-                st.toast(f"✅ {sucessos} caso(s) processado(s) com sucesso!")
+                st.toast(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
                 time.sleep(1.5)
                 st.cache_data.clear()
                 st.rerun()
 
+# 3. MODAL EDITAR CASOS
 @st.dialog("📝 Editar Casos")
 def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
     st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
+    st.caption("⚠️ Importante: Você já deve ter aceito os casos antes de editá-los.")
     
     opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
     if "Fechado" not in opcoes_status:
@@ -473,9 +501,6 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
-                dono_original = row['ID do Proprietário']
-                
-                is_fechado = row['Status'] in ['Closed', 'Fechado']
                 
                 payload = {}
                 if novo_status: payload['Status'] = novo_status
@@ -483,19 +508,7 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                     payload['FOZ_SubStatus__c'] = "" if novo_substatus == "Limpar Campo (Vazio)" else novo_substatus
                     
                 try:
-                    # 1. Toma posse do caso primeiro (se ele já não estiver fechado) para não dar bloqueio
-                    if not is_fechado:
-                        try: sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                        except: pass
-                        
-                    # 2. Executa as edições
                     sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    
-                    # 3. Devolve a posse
-                    if not is_fechado and dono_original != api_usr_id:
-                        try: sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                        except: pass
-                        
                     sucessos += 1
                 except Exception as e:
                     erros.append(f"Erro no caso {num_caso}: {str(e)}")
@@ -508,6 +521,7 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
+# 4. MODAL FOLLOW-UP
 @st.dialog("🔔 Criar Tarefa de Follow-up")
 def modal_followup(casos_selecionados_df, lista_prop):
     st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
@@ -813,15 +827,19 @@ else:
             if not casos_selecionados.empty:
                 st.markdown(f"**⚡ Ações Disponíveis para {len(casos_selecionados)} caso(s) selecionado(s):**")
                 
-                c_btn1, c_btn2, c_btn3 = st.columns(3)
+                # 4 Botões Agora
+                c_btn1, c_btn2, c_btn3, c_btn4 = st.columns(4)
                 
                 with c_btn1:
+                    if st.button("👍 Aceitar Casos (API)", use_container_width=True):
+                        modal_aceitar_api(casos_selecionados, df_view, api_user_id)
+                with c_btn2:
                     if st.button("🔄 Transferir e Comentar", use_container_width=True):
                         modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
-                with c_btn2:
+                with c_btn3:
                     if st.button("📝 Editar Casos", use_container_width=True):
                         modal_editar_casos(casos_selecionados, df_view, api_user_id)
-                with c_btn3:
+                with c_btn4:
                     if st.button("🔔 Criar Follow-up", use_container_width=True):
                         modal_followup(casos_selecionados, lista_proprietarios)
 
