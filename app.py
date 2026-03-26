@@ -172,7 +172,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # Consulta atualizada com FOZ_SubStatus__c
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
@@ -351,23 +350,39 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         return pd.DataFrame()
 
 # --- FUNÇÕES DE MODAIS (POP-UPS) ---
+
 @st.dialog("🔄 Transferir e Comentar")
 def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
-    st.markdown(f"Você está executando ação em **{len(casos_selecionados_df)} caso(s)**.")
+    st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
     
-    dono_selecionado = st.selectbox("Selecione o Novo Proprietário (*Obrigatório*):", [""] + list(lista_prop.keys()))
+    # Validação de BaseCorp
+    casos_com_basecorp = casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-']
+    tem_basecorp = not casos_com_basecorp.empty
+    
+    modo_transferencia = "Manual"
+    dono_selecionado = None
+    
+    if tem_basecorp:
+        st.info(f"🎯 Identificamos {len(casos_com_basecorp)} caso(s) com mapeamento na BaseCorp.")
+        modo_transferencia = st.radio("Como deseja realizar a transferência?", 
+                                      ["Manual (Escolher nova fila/usuário)", "Inteligente (Usar roteamento BaseCorp)"])
+        
+    if modo_transferencia.startswith("Manual"):
+        dono_selecionado = st.selectbox("Selecione o Novo Proprietário (*Obrigatório*):", [""] + list(lista_prop.keys()))
+    else:
+        st.caption("💡 Os casos com BaseCorp serão enviados para as carteiras correspondentes. Casos sem mapeamento serão ignorados.")
+        
     novo_comentario = st.text_area("Adicionar Comentário:", placeholder="(Opcional) Deixe em branco se quiser apenas transferir...", height=100)
     
-    if st.button("Confirmar Ação", type="primary", use_container_width=True):
-        if not dono_selecionado:
+    if st.button("Confirmar Transferência", type="primary", use_container_width=True):
+        if modo_transferencia.startswith("Manual") and not dono_selecionado:
             st.warning("⚠️ Por favor, selecione um proprietário para transferir.")
             return
         if not api_usr_id:
             st.error("⚠️ Erro: Não foi possível identificar seu usuário da API.")
             return
             
-        with st.spinner("Processando atualizações no Salesforce..."):
-            novo_id = lista_prop[dono_selecionado]
+        with st.spinner("Processando transferências no Salesforce..."):
             sucessos = 0
             erros = []
             
@@ -375,6 +390,29 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
                 dono_original = row['ID do Proprietário']
+                
+                is_fechado = row['Status'] in ['Closed', 'Fechado']
+                if is_fechado:
+                    erros.append(f"Caso {num_caso} ignorado: O Salesforce não permite alterar o proprietário de casos Fechados.")
+                    continue
+                
+                # Definição do destino (Manual vs BaseCorp)
+                novo_id = None
+                if modo_transferencia.startswith("Manual"):
+                    novo_id = lista_prop[dono_selecionado]
+                else:
+                    carteira_bc = row['BaseCorp Carteira']
+                    if carteira_bc == '-':
+                        erros.append(f"Caso {num_caso} ignorado: Sem mapeamento na BaseCorp.")
+                        continue
+                    for key, val in lista_prop.items():
+                        key_clean = key.replace('📁', '').replace('👤', '').strip().upper()
+                        if carteira_bc.strip().upper() in key_clean:
+                            novo_id = val
+                            break
+                    if not novo_id:
+                        erros.append(f"Caso {num_caso} ignorado: Carteira '{carteira_bc}' não achada no Salesforce.")
+                        continue
                 
                 try:
                     if dono_original != api_usr_id:
@@ -387,17 +425,82 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 except Exception as e:
                     erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
             
+            # Executa o comentário em lote se preenchido
             if novo_comentario.strip() and sucessos > 0:
                 try:
-                    payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows()]
-                    sf.bulk.CaseComment.insert(payload)
+                    payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows() if row['Status'] not in ['Closed', 'Fechado']]
+                    if payload:
+                        sf.bulk.CaseComment.insert(payload)
                 except Exception as e:
                     erros.append(f"Erro ao inserir comentários: {str(e)}")
             
             if erros:
                 for err in erros: st.error(err)
             if sucessos > 0:
-                st.toast(f"✅ {sucessos} ação(ões) concluída(s) com sucesso!")
+                st.toast(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
+                time.sleep(1.5)
+                st.cache_data.clear()
+                st.rerun()
+
+@st.dialog("📝 Editar Status e Classificações")
+def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
+    st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
+    
+    # Puxa as opções disponíveis com base nos dados totais da tela atual
+    opcoes_status = ["-- Manter Original --"] + sorted(df_view['Status'].dropna().unique().tolist())
+    novo_status = st.selectbox("Novo Status:", opcoes_status)
+    
+    opcoes_motivo = ["-- Manter Original --"] + sorted(df_view['Motivo'].dropna().unique().tolist())
+    novo_motivo = st.selectbox("Novo Motivo:", opcoes_motivo)
+    
+    opcoes_substatus = ["-- Manter Original --", "Sucesso", "Insucesso", "Indevido", "Limpar Campo (Vazio)"]
+    novo_substatus = st.selectbox("Novo Substatus:", opcoes_substatus)
+    
+    if st.button("💾 Confirmar Edições", type="primary", use_container_width=True):
+        if novo_status == "-- Manter Original --" and novo_motivo == "-- Manter Original --" and novo_substatus == "-- Manter Original --":
+            st.warning("Nenhuma alteração selecionada.")
+            return
+            
+        with st.spinner("Processando edições no Salesforce..."):
+            sucessos = 0
+            erros = []
+            
+            for _, row in casos_selecionados_df.iterrows():
+                id_caso = row['ID do Caso']
+                num_caso = row['Número']
+                dono_original = row['ID do Proprietário']
+                
+                # Identifica se o caso está fechado para NÃO fazer o bypass de dono e evitar erro
+                is_fechado = row['Status'] in ['Closed', 'Fechado']
+                
+                payload = {}
+                if novo_status != "-- Manter Original --": payload['Status'] = novo_status
+                if novo_motivo != "-- Manter Original --": payload['FOZ_Motivo__c'] = novo_motivo
+                if novo_substatus != "-- Manter Original --": 
+                    payload['FOZ_SubStatus__c'] = "" if novo_substatus == "Limpar Campo (Vazio)" else novo_substatus
+                    
+                try:
+                    # Só tenta fazer o bypass de proprietário se o caso estiver ABERTO
+                    if not is_fechado and dono_original != api_usr_id:
+                        try: sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                        except: pass
+                        
+                    # Executa a edição real dos campos
+                    sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
+                    
+                    # Devolve a propriedade se o caso estava aberto
+                    if not is_fechado and dono_original != api_usr_id:
+                        try: sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                        except: pass
+                        
+                    sucessos += 1
+                except Exception as e:
+                    erros.append(f"Erro no caso {num_caso}: {str(e)}")
+                    
+            if erros:
+                for err in erros: st.error(err)
+            if sucessos > 0:
+                st.toast(f"✅ {sucessos} caso(s) editado(s) com sucesso!")
                 time.sleep(1.5)
                 st.cache_data.clear()
                 st.rerun()
@@ -434,66 +537,6 @@ def modal_followup(casos_selecionados_df, lista_prop):
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro ao criar Follow-up: {e}")
-
-@st.dialog("🎯 Transferência Inteligente (BaseCorp)")
-def modal_basecorp(casos_selecionados_df, lista_prop, api_usr_id):
-    st.markdown("O sistema vai ler a planilha **basecorp.xlsx** e transferir automaticamente os casos que possuírem mapeamento.")
-    
-    acoes_planejadas = []
-    sem_mapeamento = []
-    
-    for _, row in casos_selecionados_df.iterrows():
-        carteira_basecorp = row['BaseCorp Carteira']
-        
-        if carteira_basecorp == "-":
-            sem_mapeamento.append(row['Número'])
-            continue
-            
-        novo_id = None
-        for key, val in lista_prop.items():
-            key_clean = key.replace('📁', '').replace('👤', '').strip().upper()
-            if carteira_basecorp.strip().upper() in key_clean:
-                novo_id = val
-                break
-                
-        if novo_id:
-            acoes_planejadas.append((row, novo_id, carteira_basecorp))
-        else:
-            sem_mapeamento.append(f"{row['Número']} (Fila '{carteira_basecorp}' não achada no SF)")
-            
-    if acoes_planejadas:
-        st.success(f"**{len(acoes_planejadas)} caso(s)** prontos para roteamento automático.")
-    if sem_mapeamento:
-        st.warning(f"**{len(sem_mapeamento)} caso(s)** ignorados por falta de mapeamento ou fila inexistente.")
-        
-    if st.button("Executar Roteamento Automático", type="primary", use_container_width=True):
-        if not acoes_planejadas:
-            st.error("Nenhum caso apto para transferência automática.")
-            return
-            
-        with st.spinner("Processando atualizações no Salesforce..."):
-            sucessos = 0
-            erros = []
-            
-            for row, novo_id, _ in acoes_planejadas:
-                id_caso = row['ID do Caso']
-                dono_original = row['ID do Proprietário']
-                try:
-                    if dono_original != api_usr_id:
-                        sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    if novo_id != api_usr_id:
-                        sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    sucessos += 1
-                except Exception as e:
-                    erros.append(str(e))
-                    
-            if erros:
-                st.error("Ocorreram erros em algumas transferências.")
-            if sucessos > 0:
-                st.toast(f"✅ {sucessos} caso(s) roteado(s) automaticamente com sucesso!")
-                time.sleep(1.5)
-                st.cache_data.clear()
-                st.rerun()
 
 # --- FUNÇÃO PARA DESENHAR O CARD QUADRADO ---
 def desenhar_card(fila_nome, df_fila):
@@ -735,12 +778,13 @@ else:
         container_rodape = st.container()
         
         with container_tabela:
-            st.caption("💡 **Dica:** Marque a caixa 'Selecionar' na tabela para exibir as **Ações em Massa** no topo. Dê dois cliques no **Status/Motivo/Substatus** para editar e salvar.")
+            st.caption("💡 **Dica:** Marque a caixa 'Selecionar' na tabela para exibir os **Botões de Ação** no topo.")
 
             def colorir_linha(row):
                 return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
 
-            colunas_bloqueadas = df_view.columns.drop(['Selecionar', 'Status', 'Motivo', 'Substatus']).tolist()
+            # Bloqueia todas as colunas exceto a de Selecionar
+            colunas_bloqueadas = df_view.columns.drop(['Selecionar']).tolist()
 
             edited_df = st.data_editor(
                 df_view.style.apply(colorir_linha, axis=1),
@@ -752,8 +796,7 @@ else:
                     "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
                     "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
                     "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
-                    "Descrição": st.column_config.TextColumn("Descrição", width="large"),
-                    "Substatus": st.column_config.SelectboxColumn("Substatus", options=["Sucesso", "Insucesso", "Indevido", ""])
+                    "Descrição": st.column_config.TextColumn("Descrição", width="large")
                 },
                 disabled=colunas_bloqueadas,
                 use_container_width=True,
@@ -766,14 +809,16 @@ else:
         with container_acoes:
             if not casos_selecionados.empty:
                 st.markdown(f"**⚡ Ações Disponíveis para {len(casos_selecionados)} caso(s) selecionado(s):**")
-                c_btn1, c_btn2, c_btn3, c_btn4 = st.columns([1.2, 1, 1, 2])
+                
+                # 3 Botões perfeitamente alinhados e do mesmo tamanho
+                c_btn1, c_btn2, c_btn3 = st.columns(3)
                 
                 with c_btn1:
                     if st.button("🔄 Transferir e Comentar", use_container_width=True):
                         modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
                 with c_btn2:
-                    if st.button("🎯 Roteamento BaseCorp", use_container_width=True):
-                        modal_basecorp(casos_selecionados, lista_proprietarios, api_user_id)
+                    if st.button("📝 Editar Casos", use_container_width=True):
+                        modal_editar_casos(casos_selecionados, df_view, api_user_id)
                 with c_btn3:
                     if st.button("🔔 Criar Follow-up", use_container_width=True):
                         modal_followup(casos_selecionados, lista_proprietarios)
@@ -781,52 +826,6 @@ else:
         with container_rodape:
             st.markdown("---")
             
-            # --- VACINA CONTRA O BUG DE COMPARAÇÃO DO PANDAS ---
-            df_view_safe = df_view.fillna('')
-            edited_df_safe = edited_df.fillna('')
-            
-            df_alteracoes = edited_df[
-                (edited_df_safe['Status'] != df_view_safe['Status']) | 
-                (edited_df_safe['Motivo'] != df_view_safe['Motivo']) |
-                (edited_df_safe['Substatus'] != df_view_safe['Substatus'])
-            ]
-            
-            if not df_alteracoes.empty:
-                st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
-                if st.button("💾 Salvar Alterações no Salesforce", type="primary"):
-                    if api_user_id is None:
-                        st.error("Erro: Não foi possível identificar seu usuário para realizar a alteração.")
-                    else:
-                        with st.spinner("Processando atualizações no Salesforce..."):
-                            try:
-                                for _, row in df_alteracoes.iterrows():
-                                    id_caso = row['ID do Caso']
-                                    dono_original = row['ID do Proprietário']
-                                    
-                                    if dono_original != api_user_id:
-                                        sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                        
-                                    payload_update = {
-                                        'Status': row['Status'], 
-                                        'FOZ_Motivo__c': row['Motivo']
-                                    }
-                                    
-                                    sub_val = row['Substatus'] if pd.notna(row['Substatus']) and row['Substatus'] != "" else None
-                                    payload_update['FOZ_SubStatus__c'] = sub_val
-                                    
-                                    sf.Case.update(id_caso, payload_update, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                    
-                                    if dono_original != api_user_id:
-                                        sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                    
-                                st.toast("✅ Alterações salvas com sucesso no Salesforce!")
-                                time.sleep(1.5)
-                                st.cache_data.clear()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao salvar alterações: {e}")
-
-            st.markdown("<br>", unsafe_allow_html=True)
             def to_excel(df_export):
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
