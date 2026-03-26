@@ -369,7 +369,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     if modo_transferencia.startswith("Manual"):
         dono_selecionado = st.selectbox("Selecione o Novo Proprietário (*Obrigatório*):", [""] + list(lista_prop.keys()))
     else:
-        st.caption("💡 Os casos com BaseCorp serão enviados para as carteiras correspondentes. Casos sem mapeamento serão ignorados.")
+        st.caption("💡 Os casos com BaseCorp serão enviados para as carteiras correspondentes. Casos sem mapeamento exigirão transferência manual depois.")
         
     novo_comentario = st.text_area("Adicionar Comentário:", placeholder="(Opcional) Deixe em branco se quiser apenas transferir...", height=100)
     
@@ -381,19 +381,39 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
             st.error("⚠️ Erro: Não foi possível identificar seu usuário da API.")
             return
             
-        with st.spinner("Processando transferências no Salesforce..."):
+        with st.spinner("Processando atualizações de Posse e Transferência..."):
             sucessos = 0
             erros = []
+            casos_aceitos = []
             
+            # PASSO 1: ACEITAR (Toma Posse)
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
-                dono_original = row['ID do Proprietário']
-                
                 is_fechado = row['Status'] in ['Closed', 'Fechado']
+                
                 if is_fechado:
-                    erros.append(f"Caso {num_caso} ignorado: O Salesforce não permite alterar o proprietário de casos Fechados.")
+                    erros.append(f"Caso {num_caso} ignorado: Salesforce bloqueia transferência de casos fechados.")
                     continue
+                    
+                try:
+                    sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                    casos_aceitos.append(row)
+                except Exception as e:
+                    erros.append(f"Erro ao 'Aceitar' o caso {num_caso}: {str(e)}")
+                    
+            # PASSO 2: COMENTAR (Enquanto somos os donos oficiais)
+            if novo_comentario.strip() and casos_aceitos:
+                try:
+                    payload_coment = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for row in casos_aceitos]
+                    sf.bulk.CaseComment.insert(payload_coment)
+                except Exception as e:
+                    erros.append(f"Erro ao inserir comentários em lote: {str(e)}")
+                    
+            # PASSO 3: TRANSFERIR AO DESTINO
+            for row in casos_aceitos:
+                id_caso = row['ID do Caso']
+                num_caso = row['Número']
                 
                 novo_id = None
                 if modo_transferencia.startswith("Manual"):
@@ -409,32 +429,21 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                             novo_id = val
                             break
                     if not novo_id:
-                        erros.append(f"Caso {num_caso} ignorado: Carteira '{carteira_bc}' não achada no Salesforce.")
+                        erros.append(f"Caso {num_caso} ignorado: Carteira '{carteira_bc}' não achada.")
                         continue
-                
-                try:
-                    if dono_original != api_usr_id:
-                        sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                         
-                    if novo_id != api_usr_id:
-                        sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                        
-                    sucessos += 1
-                except Exception as e:
-                    erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
-            
-            if novo_comentario.strip() and sucessos > 0:
-                try:
-                    payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows() if row['Status'] not in ['Closed', 'Fechado']]
-                    if payload:
-                        sf.bulk.CaseComment.insert(payload)
-                except Exception as e:
-                    erros.append(f"Erro ao inserir comentários: {str(e)}")
+                if novo_id:
+                    try:
+                        if novo_id != api_usr_id:
+                            sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                        sucessos += 1
+                    except Exception as e:
+                        erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
             
             if erros:
                 for err in erros: st.error(err)
             if sucessos > 0:
-                st.toast(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
+                st.toast(f"✅ {sucessos} caso(s) processado(s) com sucesso!")
                 time.sleep(1.5)
                 st.cache_data.clear()
                 st.rerun()
@@ -443,7 +452,6 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
 def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
     st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
     
-    # Prepara as opções de Status e adiciona "Fechado" fixo se não existir na lista da visualização atual
     opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
     if "Fechado" not in opcoes_status:
         opcoes_status.append("Fechado")
@@ -475,12 +483,15 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                     payload['FOZ_SubStatus__c'] = "" if novo_substatus == "Limpar Campo (Vazio)" else novo_substatus
                     
                 try:
-                    if not is_fechado and dono_original != api_usr_id:
+                    # 1. Toma posse do caso primeiro (se ele já não estiver fechado) para não dar bloqueio
+                    if not is_fechado:
                         try: sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                         except: pass
                         
+                    # 2. Executa as edições
                     sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
                     
+                    # 3. Devolve a posse
                     if not is_fechado and dono_original != api_usr_id:
                         try: sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                         except: pass
@@ -501,8 +512,7 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
 def modal_followup(casos_selecionados_df, lista_prop):
     st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
     
-    # Campo Multiselect para escolher várias pessoas de uma vez
-    users_followup = st.multiselect("Notificar / Atribuir Tarefa para (Pode selecionar vários):", list(lista_prop.keys()))
+    users_followup = st.multiselect("Notificar / Atribuir Tarefa para (Selecione vários se desejar):", list(lista_prop.keys()))
     descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=100)
     
     if st.button("Confirmar Follow-up", type="primary", use_container_width=True):
@@ -513,7 +523,6 @@ def modal_followup(casos_selecionados_df, lista_prop):
         with st.spinner("Registrando tarefas no Salesforce..."):
             try:
                 payload = []
-                # O código roda a criação da tarefa para cada pessoa selecionada e para cada caso selecionado
                 for user_nome in users_followup:
                     dono_id_tarefa = lista_prop[user_nome]
                     for _, row in casos_selecionados_df.iterrows():
@@ -526,7 +535,7 @@ def modal_followup(casos_selecionados_df, lista_prop):
                             'Priority': 'Normal'
                         })
                 sf.bulk.Task.insert(payload)
-                st.toast("✅ Tarefas de Follow-up criadas e notificadas com sucesso!")
+                st.toast(f"✅ {len(payload)} Tarefas de Follow-up criadas com sucesso!")
                 time.sleep(1.5)
                 st.cache_data.clear()
                 st.rerun()
@@ -759,7 +768,6 @@ else:
                 st.info("Nenhum dado de SLA para exibir neste filtro.")
 
     with tab2:
-        # --- A COLUNA DE LINK ESTÁ AGORA AO LADO DO NÚMERO ---
         colunas_ordem_ideal = [
             'Número', 'Link Salesforce', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo', 'Substatus',
             'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 'Descrição', 
