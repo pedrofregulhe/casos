@@ -247,32 +247,61 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 
             macro_status = "🟢 Fechado" if record['Status'] in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
             
+            data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
+            data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
+            
+            # --- LÓGICA INTELIGENTE DE SLA ---
             sla_macro = "✅ No Prazo"
             sla_visual = "⚪ Sem SLA"
             sla_atrasado_bool = False
             
-            if record['CaseMilestones'] and record['CaseMilestones'].get('records'):
-                milestones = record['CaseMilestones']['records']
-                sla_atrasado_bool = any(m.get('IsViolated') for m in milestones)
+            status_real_sf = record['Status'].strip().lower() if record['Status'] else ""
+            
+            # REGRA CUSTOMIZADA 24H: Apenas para as duas filas específicas e casos com status ESTRITAMENTE em Aberto
+            if fila_principal in ["CASOS SEM FILA - GENÉRICO", "CORPORATIVO"] and status_real_sf in ["aberto", "em aberto"]:
+                target_dt_custom = data_abertura + timedelta(hours=24)
+                diferenca_horas = (target_dt_custom - hoje_utc).total_seconds() / 3600
+                
+                sla_atrasado_bool = diferenca_horas < 0
                 sla_macro = "🔴 Atrasado" if sla_atrasado_bool else "✅ No Prazo"
                 
-                target_date_str = milestones[0].get('TargetDate')
-                if target_date_str and macro_status != "🟢 Fechado":
-                    target_dt = pd.to_datetime(target_date_str).replace(tzinfo=None)
-                    diferenca = (target_dt - hoje_utc).days
-                    
-                    if sla_atrasado_bool or diferenca < 0:
-                        sla_visual = f"🔴 Atrasado ({abs(diferenca)} d)"
-                    elif diferenca == 0:
-                        sla_visual = "🟡 Vence Hoje"
+                if sla_atrasado_bool:
+                    horas_atraso = abs(diferenca_horas)
+                    if horas_atraso >= 24:
+                        sla_visual = f"🔴 Atrasado ({int(horas_atraso/24)} d)"
                     else:
-                        sla_visual = f"🟢 No Prazo ({diferenca} d)"
+                        sla_visual = f"🔴 Atrasado ({int(horas_atraso)} h)"
+                else:
+                    if diferenca_horas <= 4:
+                        sla_visual = f"🟡 Vence Hoje ({int(diferenca_horas)} h)"
+                    elif diferenca_horas >= 24:
+                        sla_visual = f"🟢 No Prazo ({int(diferenca_horas/24)} d)"
+                    else:
+                        sla_visual = f"🟢 No Prazo ({int(diferenca_horas)} h)"
+                        
+            else:
+                # REGRA PADRÃO: CaseMilestones do Salesforce para os demais casos
+                if record['CaseMilestones'] and record['CaseMilestones'].get('records'):
+                    milestones = record['CaseMilestones']['records']
+                    sla_atrasado_bool = any(m.get('IsViolated') for m in milestones)
+                    sla_macro = "🔴 Atrasado" if sla_atrasado_bool else "✅ No Prazo"
+                    
+                    target_date_str = milestones[0].get('TargetDate')
+                    if target_date_str and macro_status != "🟢 Fechado":
+                        target_dt = pd.to_datetime(target_date_str).replace(tzinfo=None)
+                        diferenca = (target_dt - hoje_utc).days
+                        
+                        if sla_atrasado_bool or diferenca < 0:
+                            sla_visual = f"🔴 Atrasado ({abs(diferenca)} d)"
+                        elif diferenca == 0:
+                            sla_visual = "🟡 Vence Hoje"
+                        else:
+                            sla_visual = f"🟢 No Prazo ({diferenca} d)"
+                    elif macro_status == "🟢 Fechado":
+                        sla_visual = "✅ Fechado"
                 elif macro_status == "🟢 Fechado":
                     sla_visual = "✅ Fechado"
-            
-            data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
-            data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
-            
+
             fim_calc = data_fechamento if data_fechamento else hoje_utc
             idade_dias = (fim_calc - data_abertura).days
             
