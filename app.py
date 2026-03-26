@@ -15,9 +15,8 @@ except ImportError:
     HAS_AUTOREFRESH = False
 
 # --- CONFIGURAÇÃO DE CAMPOS DO SALESFORCE ---
-# ⚠️ ATENÇÃO: O Salesforce rejeitou o 'FOZ_CodigoItem__c'. Voltei para o anterior para não quebrar a tela.
-# Descubra o "Nome da API" exato do seu campo de Item de Contrato e altere aqui dentro das aspas:
-CAMPO_ITEM_CONTRATO = 'FOZ_Asset__r.Name'
+# Campo atualizado conforme sua instrução para puxar o código do item
+CAMPO_ITEM_CONTRATO = 'Codigo_do_Item__c'
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
@@ -118,6 +117,7 @@ def load_basecorp():
     except Exception as e:
         return {}
 
+# 🛡️ CORREÇÃO: Função extratora blindada contra valores nulos (NoneType)
 def extract_field(record, field_path):
     parts = field_path.split('.')
     val = record
@@ -125,8 +125,8 @@ def extract_field(record, field_path):
         if val and isinstance(val, dict):
             val = val.get(part)
         else:
-            return None
-    return str(val) if val else ""
+            return "" # Devolve vazio em vez de None para não quebrar o .strip()
+    return str(val) if val is not None else ""
 
 # --- FUNÇÕES DE BUSCA ---
 @st.cache_data(ttl=86400)
@@ -174,6 +174,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # A query agora pede o Codigo_do_Item__c oficialmente
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
@@ -281,6 +282,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
                 classificacao = record['Account']['FOZ_Classificacao__c']
                 
+            # Extração blindada do campo de item de contrato
             raw_item_contrato = extract_field(record, CAMPO_ITEM_CONTRATO).strip()
             item_contrato_limpo = raw_item_contrato.lstrip('0') if raw_item_contrato else ""
             if raw_item_contrato and not item_contrato_limpo: 
@@ -529,7 +531,6 @@ except Exception:
 st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
-# --- ATUALIZAÇÃO AUTOMÁTICA ---
 if HAS_AUTOREFRESH:
     modo_tv = st.sidebar.toggle("⏱️ Atualização Automática (5 min)")
     if modo_tv:
