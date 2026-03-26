@@ -6,6 +6,13 @@ from datetime import datetime, timedelta, timezone
 import plotly.express as px
 import time
 
+# Tenta importar o autorefresh para o Modo TV
+try:
+    from streamlit_autorefresh import st_autorefresh
+    HAS_AUTOREFRESH = True
+except ImportError:
+    HAS_AUTOREFRESH = False
+
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
 
@@ -13,15 +20,11 @@ st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar
 st.markdown("""
     <style>
     .stApp { background-color: #ffffff !important; }
-    
     header { background-color: transparent !important; }
-    
     #MainMenu { visibility: hidden !important; display: none !important; }
     footer { visibility: hidden !important; display: none !important; }
     .block-container { padding-top: 1.5rem !important; padding-bottom: 1rem !important; }
-    
     h1 { font-size: 24px !important; margin-bottom: 20px !important; color: #1a2935; }
-    
     .stButton>button {
         border-radius: 0px 0px 8px 8px !important;
         border-top: none !important;
@@ -31,20 +34,12 @@ st.markdown("""
         margin-top: -15px !important;
         border: 1px solid #dce1e6 !important;
     }
-    .stButton>button:hover {
-        background-color: #0056b3 !important;
-        color: white !important;
-    }
+    .stButton>button:hover { background-color: #0056b3 !important; color: white !important; }
     .btn-login>button {
-        border-radius: 8px !important;
-        margin-top: 10px !important;
-        background-color: #0056b3 !important;
-        color: white !important;
-        border: none !important;
+        border-radius: 8px !important; margin-top: 10px !important;
+        background-color: #0056b3 !important; color: white !important; border: none !important;
     }
-    .btn-login>button:hover {
-        background-color: #004494 !important;
-    }
+    .btn-login>button:hover { background-color: #004494 !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -150,12 +145,13 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # Query atualizada para puxar TargetDate (Data Alvo do SLA)
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
         Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, OwnerId, Owner.Name, 
-        (SELECT IsViolated FROM CaseMilestones),
+        (SELECT IsViolated, TargetDate FROM CaseMilestones ORDER BY TargetDate ASC),
         (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
     FROM Case 
     WHERE (Type = 'OA' 
@@ -222,7 +218,31 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 subfila = dono_upper
                 
             macro_status = "🟢 Fechado" if record['Status'] in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
-            sla_atrasado = any(m['IsViolated'] for m in record['CaseMilestones']['records']) if record['CaseMilestones'] else False
+            
+            # --- NOVA LÓGICA: SLA COUNTDOWN PROATIVO ---
+            sla_macro = "✅ No Prazo"
+            sla_visual = "⚪ Sem SLA"
+            sla_atrasado_bool = False
+            
+            if record['CaseMilestones'] and record['CaseMilestones'].get('records'):
+                milestones = record['CaseMilestones']['records']
+                sla_atrasado_bool = any(m.get('IsViolated') for m in milestones)
+                sla_macro = "🔴 Atrasado" if sla_atrasado_bool else "✅ No Prazo"
+                
+                # Pega a data alvo do primeiro milestone para o Countdown
+                target_date_str = milestones[0].get('TargetDate')
+                if target_date_str and macro_status != "🟢 Fechado":
+                    target_dt = pd.to_datetime(target_date_str).replace(tzinfo=None)
+                    diferenca = (target_dt - hoje_utc).days
+                    
+                    if sla_atrasado_bool or diferenca < 0:
+                        sla_visual = f"🔴 Atrasado ({abs(diferenca)} d)"
+                    elif diferenca == 0:
+                        sla_visual = "🟡 Vence Hoje"
+                    else:
+                        sla_visual = f"🟢 No Prazo ({diferenca} d)"
+                elif macro_status == "🟢 Fechado":
+                    sla_visual = "✅ Fechado"
             
             data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
             data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
@@ -246,7 +266,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                         data_str = dt_obj.strftime('%d/%m/%Y %H:%M')
                     except:
                         data_str = comment['CreatedDate']
-                        
                     historico_comentarios += f"🗣️ {autor} em {data_str}:\n{texto}\n\n"
             
             if desc_oficial and historico_comentarios:
@@ -261,19 +280,20 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'ID do Proprietário': record['OwnerId'],
                 'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
                 'Número': record['CaseNumber'],
-                'Status': record['Status'],
+                'Abertura': data_abertura,
+                'Fechamento': data_fechamento,
+                'Origem': record['Origin'],
+                'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
                 'Motivo': record['FOZ_Motivo__c'],
+                'SLA (Prazo)': sla_visual,
+                'SLA Macro': sla_macro,
+                'Status': record['Status'],
                 'Descrição': descricao_final,
                 'Fila Principal': fila_principal,
                 'Subfila': subfila,
                 'Macro Status': macro_status,
                 'Idade (Dias)': idade_dias,
-                'SLA Atrasado': '🔴 Atrasado' if sla_atrasado else '✅ No Prazo',
-                'Origem': record['Origin'],
-                'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
-                'Conta': record['Account']['Name'] if record['Account'] else '-',
-                'Abertura': data_abertura,
-                'Fechamento': data_fechamento
+                'Conta': record['Account']['Name'] if record['Account'] else '-'
             })
             
         df_final = pd.DataFrame(linhas)
@@ -314,7 +334,6 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
             sucessos = 0
             erros = []
             
-            # Executa transferência
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
@@ -331,7 +350,6 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 except Exception as e:
                     erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
             
-            # Executa o comentário em lote se preenchido
             if novo_comentario.strip() and sucessos > 0:
                 try:
                     payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows()]
@@ -385,7 +403,7 @@ def desenhar_card(fila_nome, df_fila):
     vol = len(df_fila)
     trat = len(df_fila[df_fila['Macro Status'] == '🟡 Em Tratativa'])
     fech = len(df_fila[df_fila['Macro Status'] == '🟢 Fechado'])
-    atr = len(df_fila[(df_fila['SLA Atrasado'] == '🔴 Atrasado') & (df_fila['Macro Status'] == '🟡 Em Tratativa')])
+    atr = len(df_fila[(df_fila['SLA Macro'] == '🔴 Atrasado') & (df_fila['Macro Status'] == '🟡 Em Tratativa')])
     
     cor_atraso = "#d9534f" if atr > 0 else "#555555"
     borda_destaque = "border-top: 4px solid #d9534f;" if fila_nome == "SAFETY" else ""
@@ -415,7 +433,17 @@ except Exception:
 st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
-# Busca Global adicionada à Sidebar
+# --- NOVO: MODO TV (AUTO-REFRESH) ---
+if HAS_AUTOREFRESH:
+    modo_tv = st.sidebar.toggle("⏱️ Modo TV (Atualiza a cada 5 min)")
+    if modo_tv:
+        st_autorefresh(interval=5 * 60 * 1000, key="data_refresh")
+else:
+    st.sidebar.caption("💡 Para habilitar o Modo TV (Auto-Refresh), instale o pacote via terminal: `pip install streamlit-autorefresh`")
+
+st.sidebar.markdown("---")
+
+# Busca Global
 busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
 
 st.markdown("""
@@ -452,12 +480,18 @@ if periodo_selecionado == "Personalizado":
         st.sidebar.warning("Selecione a data de início e fim no calendário para carregar.")
         st.stop()
 
+# --- NOVO: FILTRO MEUS CASOS ---
+filtro_meus_casos = st.sidebar.toggle("🙋‍♂️ Ver apenas Meus Casos", value=False)
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 
 user, pwd, token = st.session_state.sf_username, st.session_state.sf_password, st.session_state.sf_token
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, user, pwd, token)
 lista_proprietarios = get_owner_options(user, pwd, token)
 api_user_id = get_api_user_id(user, pwd, token)
+
+# Aplicação do Filtro "Meus Casos"
+if filtro_meus_casos and not df_filtrado.empty and api_user_id:
+    df_filtrado = df_filtrado[df_filtrado['ID do Proprietário'] == api_user_id]
 
 # Aplicação da Busca Global
 if busca_global and not df_filtrado.empty:
@@ -591,10 +625,10 @@ else:
                 st.info("Nenhum caso em aberto no momento para o filtro selecionado.")
                 
         with c2:
-            df_sla = df_view['SLA Atrasado'].value_counts().reset_index()
+            df_sla = df_view['SLA Macro'].value_counts().reset_index()
             if not df_sla.empty:
-                fig_sla = px.pie(df_sla, names='SLA Atrasado', values='count', hole=0.5, title='Saúde do SLA (Total)', 
-                                 color='SLA Atrasado', color_discrete_map={'✅ No Prazo':'#00CC96', '🔴 Atrasado':'#EF553B'})
+                fig_sla = px.pie(df_sla, names='SLA Macro', values='count', hole=0.5, title='Saúde do SLA (Total)', 
+                                 color='SLA Macro', color_discrete_map={'✅ No Prazo':'#00CC96', '🔴 Atrasado':'#EF553B'})
                 fig_sla.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_sla, use_container_width=True)
             else:
@@ -602,10 +636,11 @@ else:
 
     # === ABA 2: EXTRATO E AÇÕES EM MASSA ===
     with tab2:
+        # --- NOVA ORDENAÇÃO DE COLUNAS PERFEITA ---
         colunas_ordem_ideal = [
-            'Número', 'Status', 'Motivo', 'Link Salesforce', 'Descrição', 
-            'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'SLA Atrasado',
-            'Origem', 'Tipo Solicitação', 'Conta', 'Abertura', 'Fechamento', 'ID do Caso', 'ID do Proprietário'
+            'Número', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo',
+            'SLA (Prazo)', 'Status', 'Link Salesforce', 'Descrição', 
+            'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'Conta', 'ID do Caso', 'ID do Proprietário'
         ]
         df_view = df_view[colunas_ordem_ideal]
         df_view.insert(0, 'Selecionar', False)
@@ -619,7 +654,7 @@ else:
             st.caption("💡 **Dica:** Marque a caixa 'Selecionar' na tabela para exibir as **Ações em Massa** no topo. Dê dois cliques no **Status/Motivo** para editar e salvar.")
 
             def colorir_linha(row):
-                return ['background-color: #ffebee' if row['SLA Atrasado'] == '🔴 Atrasado' else 'background-color: #ffffff' for _ in row]
+                return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
 
             colunas_bloqueadas = df_view.columns.drop(['Selecionar', 'Status', 'Motivo']).tolist()
 
@@ -666,7 +701,7 @@ else:
                     if api_user_id is None:
                         st.error("Erro: Não foi possível identificar seu usuário para realizar a alteração.")
                     else:
-                        with st.spinner("Atualizando registros no Salesforce..."):
+                        with st.spinner("Processando atualizações no Salesforce..."):
                             try:
                                 for _, row in df_alteracoes.iterrows():
                                     id_caso = row['ID do Caso']
