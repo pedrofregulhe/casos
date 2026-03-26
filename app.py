@@ -435,7 +435,7 @@ st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
 # --- NOVO: MODO TV (AUTO-REFRESH) ---
 if HAS_AUTOREFRESH:
-    modo_tv = st.sidebar.toggle("⏱️ Modo TV (Atualiza a cada 5 min)")
+    modo_tv = st.sidebar.toggle("⏱️ Atualizar Automaticamente (a cada 5min.)")
     if modo_tv:
         st_autorefresh(interval=5 * 60 * 1000, key="data_refresh")
 else:
