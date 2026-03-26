@@ -14,7 +14,6 @@ st.markdown("""
     <style>
     .stApp { background-color: #ffffff !important; }
     
-    /* CORREÇÃO DA BARRA LATERAL: Fundo transparente em vez de invisível */
     header { background-color: transparent !important; }
     
     #MainMenu { visibility: hidden !important; display: none !important; }
@@ -302,7 +301,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     dono_selecionado = st.selectbox("Selecione o Novo Proprietário (*Obrigatório*):", [""] + list(lista_prop.keys()))
     novo_comentario = st.text_area("Adicionar Comentário:", placeholder="(Opcional) Deixe em branco se quiser apenas transferir...", height=100)
     
-    if st.button("🚀 Confirmar Ação", type="primary", use_container_width=True):
+    if st.button("Confirmar Ação", type="primary", use_container_width=True):
         if not dono_selecionado:
             st.warning("⚠️ Por favor, selecione um proprietário para transferir.")
             return
@@ -310,7 +309,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
             st.error("⚠️ Erro: Não foi possível identificar seu usuário da API.")
             return
             
-        with st.spinner("Executando magia no Salesforce..."):
+        with st.spinner("Processando atualizações no Salesforce..."):
             novo_id = lista_prop[dono_selecionado]
             sucessos = 0
             erros = []
@@ -332,7 +331,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 except Exception as e:
                     erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
             
-            # Se a pessoa digitou comentário, executa o comentário em lote
+            # Executa o comentário em lote se preenchido
             if novo_comentario.strip() and sucessos > 0:
                 try:
                     payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows()]
@@ -355,7 +354,7 @@ def modal_followup(casos_selecionados_df, lista_prop):
     user_followup = st.selectbox("Notificar / Atribuir Tarefa para:", [""] + list(lista_prop.keys()))
     descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=100)
     
-    if st.button("🔔 Confirmar Follow-up", type="primary", use_container_width=True):
+    if st.button("Confirmar Follow-up", type="primary", use_container_width=True):
         if not user_followup or not descricao_followup.strip():
             st.warning("⚠️ Selecione um usuário e digite a descrição da tarefa.")
             return
@@ -416,7 +415,7 @@ except Exception:
 st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
-# Busca Global
+# Busca Global adicionada à Sidebar
 busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
 
 st.markdown("""
@@ -611,8 +610,84 @@ else:
         df_view = df_view[colunas_ordem_ideal]
         df_view.insert(0, 'Selecionar', False)
         
-        col_dl, col_aviso = st.columns([1, 3])
-        with col_dl:
+        container_acoes = st.container()
+        st.markdown("<br>", unsafe_allow_html=True)
+        container_tabela = st.container()
+        container_rodape = st.container()
+        
+        with container_tabela:
+            st.caption("💡 **Dica:** Marque a caixa 'Selecionar' na tabela para exibir as **Ações em Massa** no topo. Dê dois cliques no **Status/Motivo** para editar e salvar.")
+
+            def colorir_linha(row):
+                return ['background-color: #ffebee' if row['SLA Atrasado'] == '🔴 Atrasado' else 'background-color: #ffffff' for _ in row]
+
+            colunas_bloqueadas = df_view.columns.drop(['Selecionar', 'Status', 'Motivo']).tolist()
+
+            edited_df = st.data_editor(
+                df_view.style.apply(colorir_linha, axis=1),
+                column_config={
+                    "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
+                    "ID do Caso": None, 
+                    "ID do Proprietário": None, 
+                    "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
+                    "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
+                    "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
+                    "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
+                    "Descrição": st.column_config.TextColumn("Descrição", width="large")
+                },
+                disabled=colunas_bloqueadas,
+                use_container_width=True,
+                hide_index=True,
+                key=f"editor_{fila_atual}"
+            )
+        
+        casos_selecionados = edited_df[edited_df['Selecionar'] == True]
+        
+        with container_acoes:
+            if not casos_selecionados.empty:
+                st.markdown(f"**⚡ Ações Disponíveis para {len(casos_selecionados)} caso(s) selecionado(s):**")
+                c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 2])
+                
+                with c_btn1:
+                    if st.button("🔄 Transferir e Comentar", use_container_width=True):
+                        modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
+                
+                with c_btn2:
+                    if st.button("🔔 Criar Follow-up", use_container_width=True):
+                        modal_followup(casos_selecionados, lista_proprietarios)
+
+        with container_rodape:
+            st.markdown("---")
+            
+            df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
+            if not df_alteracoes.empty:
+                st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
+                if st.button("💾 Salvar Alterações no Salesforce", type="primary"):
+                    if api_user_id is None:
+                        st.error("Erro: Não foi possível identificar seu usuário para realizar a alteração.")
+                    else:
+                        with st.spinner("Atualizando registros no Salesforce..."):
+                            try:
+                                for _, row in df_alteracoes.iterrows():
+                                    id_caso = row['ID do Caso']
+                                    dono_original = row['ID do Proprietário']
+                                    
+                                    if dono_original != api_user_id:
+                                        sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                        
+                                    sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    
+                                    if dono_original != api_user_id:
+                                        sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    
+                                st.toast("✅ Alterações salvas com sucesso no Salesforce!")
+                                time.sleep(1.5)
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao salvar alterações: {e}")
+
+            st.markdown("<br>", unsafe_allow_html=True)
             def to_excel(df_export):
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -629,75 +704,3 @@ else:
                 file_name=f'extrato_{fila_atual.replace(" ", "_").lower()}.xlsx',
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
-        with col_aviso:
-            st.caption("💡 **Dica:** Selecione os casos na tabela e clique nos botões de Ação em Massa abaixo.")
-
-        def colorir_linha(row):
-            return ['background-color: #ffebee' if row['SLA Atrasado'] == '🔴 Atrasado' else 'background-color: #ffffff' for _ in row]
-
-        colunas_bloqueadas = df_view.columns.drop(['Selecionar', 'Status', 'Motivo']).tolist()
-
-        edited_df = st.data_editor(
-            df_view.style.apply(colorir_linha, axis=1),
-            column_config={
-                "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
-                "ID do Caso": None, 
-                "ID do Proprietário": None, 
-                "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
-                "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
-                "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
-                "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
-                "Descrição": st.column_config.TextColumn("Descrição", width="large")
-            },
-            disabled=colunas_bloqueadas,
-            use_container_width=True,
-            hide_index=True,
-            key=f"editor_{fila_atual}"
-        )
-        
-        # --- SALVAR ALTERAÇÕES DA TABELA (Edição de Linha) ---
-        df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
-        if not df_alteracoes.empty:
-            st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
-            if st.button("💾 Salvar Alterações no Salesforce", type="primary"):
-                if api_user_id is None:
-                    st.error("Erro: Não foi possível identificar seu usuário para realizar a alteração.")
-                else:
-                    with st.spinner("Atualizando registros..."):
-                        try:
-                            for _, row in df_alteracoes.iterrows():
-                                id_caso = row['ID do Caso']
-                                dono_original = row['ID do Proprietário']
-                                
-                                if dono_original != api_user_id:
-                                    sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                    
-                                sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                
-                                if dono_original != api_user_id:
-                                    sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                
-                            st.toast("✅ Alterações salvas com sucesso no Salesforce!")
-                            time.sleep(1.5)
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Erro ao salvar alterações: {e}")
-
-        st.markdown("---")
-
-        # --- AÇÕES EM MASSA (BOTÕES QUE ABREM OS MODAIS) ---
-        casos_selecionados = edited_df[edited_df['Selecionar'] == True]
-        
-        if not casos_selecionados.empty:
-            st.markdown(f"**Ações Disponíveis para {len(casos_selecionados)} caso(s):**")
-            
-            c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 2])
-            
-            with c_btn1:
-                if st.button("🔄 Transferir e Comentar", use_container_width=True):
-                    modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
-            
-            with c_btn2:
-                if st.button("🔔 Criar Follow-up", use_container_width=True):
-                    modal_followup(casos_selecionados, lista_proprietarios)
