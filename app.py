@@ -355,7 +355,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
     
-    # Validação de BaseCorp
     casos_com_basecorp = casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-']
     tem_basecorp = not casos_com_basecorp.empty
     
@@ -396,7 +395,6 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                     erros.append(f"Caso {num_caso} ignorado: O Salesforce não permite alterar o proprietário de casos Fechados.")
                     continue
                 
-                # Definição do destino (Manual vs BaseCorp)
                 novo_id = None
                 if modo_transferencia.startswith("Manual"):
                     novo_id = lista_prop[dono_selecionado]
@@ -425,7 +423,6 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 except Exception as e:
                     erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
             
-            # Executa o comentário em lote se preenchido
             if novo_comentario.strip() and sucessos > 0:
                 try:
                     payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows() if row['Status'] not in ['Closed', 'Fechado']]
@@ -442,22 +439,22 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
-@st.dialog("📝 Editar Status e Classificações")
+@st.dialog("📝 Editar Casos")
 def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
     st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
     
-    # Puxa as opções disponíveis com base nos dados totais da tela atual
-    opcoes_status = ["-- Manter Original --"] + sorted(df_view['Status'].dropna().unique().tolist())
-    novo_status = st.selectbox("Novo Status:", opcoes_status)
+    # Prepara as opções de Status e adiciona "Fechado" fixo se não existir na lista da visualização atual
+    opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
+    if "Fechado" not in opcoes_status:
+        opcoes_status.append("Fechado")
+        
+    novo_status = st.selectbox("Novo Status:", opcoes_status, index=None, placeholder="Selecione para alterar...")
     
-    opcoes_motivo = ["-- Manter Original --"] + sorted(df_view['Motivo'].dropna().unique().tolist())
-    novo_motivo = st.selectbox("Novo Motivo:", opcoes_motivo)
-    
-    opcoes_substatus = ["-- Manter Original --", "Sucesso", "Insucesso", "Indevido", "Limpar Campo (Vazio)"]
-    novo_substatus = st.selectbox("Novo Substatus:", opcoes_substatus)
+    opcoes_substatus = ["Sucesso", "Insucesso", "Indevido", "Limpar Campo (Vazio)"]
+    novo_substatus = st.selectbox("Novo Substatus:", opcoes_substatus, index=None, placeholder="Selecione para alterar...")
     
     if st.button("💾 Confirmar Edições", type="primary", use_container_width=True):
-        if novo_status == "-- Manter Original --" and novo_motivo == "-- Manter Original --" and novo_substatus == "-- Manter Original --":
+        if not novo_status and not novo_substatus:
             st.warning("Nenhuma alteração selecionada.")
             return
             
@@ -470,25 +467,20 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                 num_caso = row['Número']
                 dono_original = row['ID do Proprietário']
                 
-                # Identifica se o caso está fechado para NÃO fazer o bypass de dono e evitar erro
                 is_fechado = row['Status'] in ['Closed', 'Fechado']
                 
                 payload = {}
-                if novo_status != "-- Manter Original --": payload['Status'] = novo_status
-                if novo_motivo != "-- Manter Original --": payload['FOZ_Motivo__c'] = novo_motivo
-                if novo_substatus != "-- Manter Original --": 
+                if novo_status: payload['Status'] = novo_status
+                if novo_substatus: 
                     payload['FOZ_SubStatus__c'] = "" if novo_substatus == "Limpar Campo (Vazio)" else novo_substatus
                     
                 try:
-                    # Só tenta fazer o bypass de proprietário se o caso estiver ABERTO
                     if not is_fechado and dono_original != api_usr_id:
                         try: sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                         except: pass
                         
-                    # Executa a edição real dos campos
                     sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
                     
-                    # Devolve a propriedade se o caso estava aberto
                     if not is_fechado and dono_original != api_usr_id:
                         try: sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
                         except: pass
@@ -509,27 +501,30 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
 def modal_followup(casos_selecionados_df, lista_prop):
     st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
     
-    user_followup = st.selectbox("Notificar / Atribuir Tarefa para:", [""] + list(lista_prop.keys()))
+    # Campo Multiselect para escolher várias pessoas de uma vez
+    users_followup = st.multiselect("Notificar / Atribuir Tarefa para (Pode selecionar vários):", list(lista_prop.keys()))
     descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=100)
     
     if st.button("Confirmar Follow-up", type="primary", use_container_width=True):
-        if not user_followup or not descricao_followup.strip():
-            st.warning("⚠️ Selecione um usuário e digite a descrição da tarefa.")
+        if not users_followup or not descricao_followup.strip():
+            st.warning("⚠️ Selecione pelo menos um usuário e digite a descrição da tarefa.")
             return
             
         with st.spinner("Registrando tarefas no Salesforce..."):
             try:
-                dono_id_tarefa = lista_prop[user_followup]
                 payload = []
-                for _, row in casos_selecionados_df.iterrows():
-                    payload.append({
-                        'WhatId': row['ID do Caso'],
-                        'OwnerId': dono_id_tarefa,
-                        'Subject': 'Ação Requerida',
-                        'Description': descricao_followup,
-                        'Status': 'Open',
-                        'Priority': 'Normal'
-                    })
+                # O código roda a criação da tarefa para cada pessoa selecionada e para cada caso selecionado
+                for user_nome in users_followup:
+                    dono_id_tarefa = lista_prop[user_nome]
+                    for _, row in casos_selecionados_df.iterrows():
+                        payload.append({
+                            'WhatId': row['ID do Caso'],
+                            'OwnerId': dono_id_tarefa,
+                            'Subject': 'Ação Requerida',
+                            'Description': descricao_followup,
+                            'Status': 'Open',
+                            'Priority': 'Normal'
+                        })
                 sf.bulk.Task.insert(payload)
                 st.toast("✅ Tarefas de Follow-up criadas e notificadas com sucesso!")
                 time.sleep(1.5)
@@ -764,9 +759,10 @@ else:
                 st.info("Nenhum dado de SLA para exibir neste filtro.")
 
     with tab2:
+        # --- A COLUNA DE LINK ESTÁ AGORA AO LADO DO NÚMERO ---
         colunas_ordem_ideal = [
-            'Número', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo', 'Substatus',
-            'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 'Link Salesforce', 'Descrição', 
+            'Número', 'Link Salesforce', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo', 'Substatus',
+            'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 'Descrição', 
             'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'Conta', 'ID do Caso', 'ID do Proprietário'
         ]
         df_view = df_view[colunas_ordem_ideal]
@@ -783,7 +779,6 @@ else:
             def colorir_linha(row):
                 return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
 
-            # Bloqueia todas as colunas exceto a de Selecionar
             colunas_bloqueadas = df_view.columns.drop(['Selecionar']).tolist()
 
             edited_df = st.data_editor(
@@ -810,7 +805,6 @@ else:
             if not casos_selecionados.empty:
                 st.markdown(f"**⚡ Ações Disponíveis para {len(casos_selecionados)} caso(s) selecionado(s):**")
                 
-                # 3 Botões perfeitamente alinhados e do mesmo tamanho
                 c_btn1, c_btn2, c_btn3 = st.columns(3)
                 
                 with c_btn1:
