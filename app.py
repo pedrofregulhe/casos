@@ -351,53 +351,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
 # --- FUNÇÕES DE MODAIS (POP-UPS) ---
 
-# 1. MODAL: ACEITAR CASOS (COM CHAVE MESTRA DA API)
-@st.dialog("👍 Aceitar Casos (API)")
-def modal_aceitar_api(casos_selecionados_df, df_view, api_usr_id):
-    st.markdown(f"Tentando assumir a posse de **{len(casos_selecionados_df)} caso(s)** via API.")
-    
-    opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
-    status_aceite = st.selectbox("Qual o Status correto ao aceitar um caso?", ["Em Tratativa", "Em Andamento", "Aberto"] + opcoes_status)
-    
-    if st.button("Forçar Aceite no Salesforce", type="primary", use_container_width=True):
-        with st.spinner("Processando integração de posse..."):
-            sucessos = 0
-            erros = []
-            
-            for _, row in casos_selecionados_df.iterrows():
-                id_caso = row['ID do Caso']
-                num_caso = row['Número']
-                is_fechado = row['Status'] in ['Closed', 'Fechado']
-                
-                if is_fechado:
-                    erros.append(f"Caso {num_caso} ignorado: O Salesforce bloqueia aceitar casos Fechados.")
-                    continue
-                
-                # INJEÇÃO DA CHAVE MESTRA (Bypass Flow)
-                payload = {
-                    'OwnerId': api_usr_id, 
-                    'Status': status_aceite,
-                    'FOZ_Bypass_Flow__c': True
-                }
-                    
-                try:
-                    # Envia a edição com passe-livre
-                    sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    # Tranca a porta logo em seguida para manter a segurança do org
-                    sf.Case.update(id_caso, {'FOZ_Bypass_Flow__c': False}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    sucessos += 1
-                except Exception as e:
-                    erros.append(f"Caso {num_caso}: {str(e)}")
-                    
-            if erros:
-                for err in erros: st.error(err)
-            if sucessos > 0:
-                st.toast(f"✅ {sucessos} caso(s) aceito(s) com sucesso!")
-                time.sleep(1.5)
-                st.cache_data.clear()
-                st.rerun()
-
-# 2. MODAL TRANSFERIR
+# 1. MODAL TRANSFERIR
 @st.dialog("🔄 Transferir e Comentar")
 def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
@@ -480,7 +434,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
-# 3. MODAL EDITAR CASOS
+# 2. MODAL EDITAR CASOS
 @st.dialog("📝 Editar Casos")
 def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
     st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
@@ -507,7 +461,7 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
                 
-                # EDIÇÃO DIRETA COM CHAVE MESTRA (Sem precisar trocar o dono)
+                # EDIÇÃO DIRETA COM CHAVE MESTRA
                 payload = {'FOZ_Bypass_Flow__c': True}
                 if novo_status: payload['Status'] = novo_status
                 if novo_substatus: 
@@ -528,7 +482,7 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
-# 4. MODAL FOLLOW-UP
+# 3. MODAL FOLLOW-UP
 @st.dialog("🔔 Criar Tarefa de Follow-up")
 def modal_followup(casos_selecionados_df, lista_prop):
     st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
@@ -834,18 +788,15 @@ else:
             if not casos_selecionados.empty:
                 st.markdown(f"**⚡ Ações Disponíveis para {len(casos_selecionados)} caso(s) selecionado(s):**")
                 
-                c_btn1, c_btn2, c_btn3, c_btn4 = st.columns(4)
+                c_btn1, c_btn2, c_btn3 = st.columns(3)
                 
                 with c_btn1:
-                    if st.button("👍 Aceitar Casos (API)", use_container_width=True):
-                        modal_aceitar_api(casos_selecionados, df_view, api_user_id)
-                with c_btn2:
                     if st.button("🔄 Transferir e Comentar", use_container_width=True):
                         modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
-                with c_btn3:
+                with c_btn2:
                     if st.button("📝 Editar Casos", use_container_width=True):
                         modal_editar_casos(casos_selecionados, df_view, api_user_id)
-                with c_btn4:
+                with c_btn3:
                     if st.button("🔔 Criar Follow-up", use_container_width=True):
                         modal_followup(casos_selecionados, lista_proprietarios)
 
