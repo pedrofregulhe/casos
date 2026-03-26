@@ -5,6 +5,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
 import time
+import os
 
 # Tenta importar o autorefresh para o Modo TV
 try:
@@ -12,6 +13,10 @@ try:
     HAS_AUTOREFRESH = True
 except ImportError:
     HAS_AUTOREFRESH = False
+
+# --- CONFIGURAÇÃO DE CAMPOS DO SALESFORCE ---
+# Alterado para buscar o código do item diretamente no objeto
+CAMPO_ITEM_CONTRATO = 'FOZ_CodigoItem__c'
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
@@ -100,6 +105,34 @@ def init_connection(user, pwd, token):
 
 sf = init_connection(st.session_state.sf_username, st.session_state.sf_password, st.session_state.sf_token)
 
+# --- LEITURA DA BASECORP (EXCEL) ---
+@st.cache_data(ttl=3600)
+def load_basecorp():
+    try:
+        # Lê o arquivo Excel local do repositório
+        df = pd.read_excel('basecorp.xlsx')
+        df.columns = df.columns.str.lower().str.strip()
+        
+        # Garante o formato texto, tira zeros invisíveis (ex: .0 do Excel) e limpa zeros à esquerda
+        df['itemcontrato'] = df['itemcontrato'].astype(str).str.replace('\.0$', '', regex=True).str.strip().str.lstrip('0')
+        df['carteira'] = df['carteira'].astype(str).str.strip()
+        
+        # Transforma em dicionário { '24560': 'Carteira A', '12345': 'Carteira B' }
+        return dict(zip(df['itemcontrato'], df['carteira']))
+    except Exception as e:
+        return {}
+
+# Função auxiliar para extrair campo dinâmico
+def extract_field(record, field_path):
+    parts = field_path.split('.')
+    val = record
+    for part in parts:
+        if val and isinstance(val, dict):
+            val = val.get(part)
+        else:
+            return None
+    return str(val) if val else ""
+
 # --- FUNÇÕES DE BUSCA ---
 @st.cache_data(ttl=86400)
 def get_api_user_id(username, _pwd, _token):
@@ -129,6 +162,7 @@ def get_owner_options(username, _pwd, _token):
 @st.cache_data(ttl=1800, show_spinner=False) 
 def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username, _pwd, _token):
     sf_conn = init_connection(username, _pwd, _token)
+    basecorp_dict = load_basecorp()
     
     if periodo_selecionado == "Personalizado" and dt_inicio and dt_fim:
         inicio_str = dt_inicio.strftime('%Y-%m-%dT00:00:00Z')
@@ -145,12 +179,12 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # Query atualizada para puxar TargetDate (Data Alvo do SLA)
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
         Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, OwnerId, Owner.Name, 
+        {CAMPO_ITEM_CONTRATO},
         (SELECT IsViolated, TargetDate FROM CaseMilestones ORDER BY TargetDate ASC),
         (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
     FROM Case 
@@ -219,7 +253,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 
             macro_status = "🟢 Fechado" if record['Status'] in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
             
-            # --- NOVA LÓGICA: SLA COUNTDOWN PROATIVO ---
             sla_macro = "✅ No Prazo"
             sla_visual = "⚪ Sem SLA"
             sla_atrasado_bool = False
@@ -229,7 +262,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 sla_atrasado_bool = any(m.get('IsViolated') for m in milestones)
                 sla_macro = "🔴 Atrasado" if sla_atrasado_bool else "✅ No Prazo"
                 
-                # Pega a data alvo do primeiro milestone para o Countdown
                 target_date_str = milestones[0].get('TargetDate')
                 if target_date_str and macro_status != "🟢 Fechado":
                     target_dt = pd.to_datetime(target_date_str).replace(tzinfo=None)
@@ -253,6 +285,16 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             classificacao = '-'
             if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
                 classificacao = record['Account']['FOZ_Classificacao__c']
+                
+            # --- INTEGRAÇÃO COM BASECORP ---
+            raw_item_contrato = extract_field(record, CAMPO_ITEM_CONTRATO).strip()
+            
+            # Remove os zeros à esquerda APENAS para buscar no dicionário do Excel
+            item_contrato_limpo = raw_item_contrato.lstrip('0') if raw_item_contrato else ""
+            if raw_item_contrato and not item_contrato_limpo: # Caso fosse '000000'
+                item_contrato_limpo = "0"
+                
+            carteira_basecorp = basecorp_dict.get(item_contrato_limpo, "-") if item_contrato_limpo else "-"
                 
             desc_oficial = record.get('Description')
             historico_comentarios = ""
@@ -286,12 +328,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
                 'Motivo': record['FOZ_Motivo__c'],
                 'SLA (Prazo)': sla_visual,
-                'SLA Macro': sla_macro,
                 'Status': record['Status'],
+                'BaseCorp Carteira': carteira_basecorp,
+                'Item de Contrato': raw_item_contrato, # Mantém o original com zeros na tabela visual
                 'Descrição': descricao_final,
                 'Fila Principal': fila_principal,
                 'Subfila': subfila,
                 'Macro Status': macro_status,
+                'SLA Macro': sla_macro,
                 'Idade (Dias)': idade_dias,
                 'Conta': record['Account']['Name'] if record['Account'] else '-'
             })
@@ -398,6 +442,66 @@ def modal_followup(casos_selecionados_df, lista_prop):
             except Exception as e:
                 st.error(f"Erro ao criar Follow-up: {e}")
 
+@st.dialog("🎯 Transferência Inteligente (BaseCorp)")
+def modal_basecorp(casos_selecionados_df, lista_prop, api_usr_id):
+    st.markdown("O sistema vai ler a planilha **basecorp.xlsx** e transferir automaticamente os casos que possuírem mapeamento.")
+    
+    acoes_planejadas = []
+    sem_mapeamento = []
+    
+    for _, row in casos_selecionados_df.iterrows():
+        carteira_basecorp = row['BaseCorp Carteira']
+        
+        if carteira_basecorp == "-":
+            sem_mapeamento.append(row['Número'])
+            continue
+            
+        novo_id = None
+        for key, val in lista_prop.items():
+            key_clean = key.replace('📁', '').replace('👤', '').strip().upper()
+            if carteira_basecorp.strip().upper() in key_clean:
+                novo_id = val
+                break
+                
+        if novo_id:
+            acoes_planejadas.append((row, novo_id, carteira_basecorp))
+        else:
+            sem_mapeamento.append(f"{row['Número']} (Fila '{carteira_basecorp}' não achada no SF)")
+            
+    if acoes_planejadas:
+        st.success(f"**{len(acoes_planejadas)} caso(s)** prontos para roteamento automático.")
+    if sem_mapeamento:
+        st.warning(f"**{len(sem_mapeamento)} caso(s)** ignorados por falta de mapeamento ou fila inexistente.")
+        
+    if st.button("Executar Roteamento Automático", type="primary", use_container_width=True):
+        if not acoes_planejadas:
+            st.error("Nenhum caso apto para transferência automática.")
+            return
+            
+        with st.spinner("Processando atualizações no Salesforce..."):
+            sucessos = 0
+            erros = []
+            
+            for row, novo_id, _ in acoes_planejadas:
+                id_caso = row['ID do Caso']
+                dono_original = row['ID do Proprietário']
+                try:
+                    if dono_original != api_usr_id:
+                        sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                    if novo_id != api_usr_id:
+                        sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                    sucessos += 1
+                except Exception as e:
+                    erros.append(str(e))
+                    
+            if erros:
+                st.error("Ocorreram erros em algumas transferências.")
+            if sucessos > 0:
+                st.toast(f"✅ {sucessos} caso(s) roteado(s) automaticamente com sucesso!")
+                time.sleep(1.5)
+                st.cache_data.clear()
+                st.rerun()
+
 # --- FUNÇÃO PARA DESENHAR O CARD QUADRADO ---
 def desenhar_card(fila_nome, df_fila):
     vol = len(df_fila)
@@ -433,17 +537,14 @@ except Exception:
 st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
-# --- NOVO: MODO TV (AUTO-REFRESH) ---
 if HAS_AUTOREFRESH:
-    modo_tv = st.sidebar.toggle("⏱️ Atualizar Automaticamente (a cada 5min.)")
+    modo_tv = st.sidebar.toggle("⏱️ Modo TV (Atualiza a cada 5 min)")
     if modo_tv:
         st_autorefresh(interval=5 * 60 * 1000, key="data_refresh")
 else:
     st.sidebar.caption("💡 Para habilitar o Modo TV (Auto-Refresh), instale o pacote via terminal: `pip install streamlit-autorefresh`")
 
 st.sidebar.markdown("---")
-
-# Busca Global
 busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
 
 st.markdown("""
@@ -480,7 +581,6 @@ if periodo_selecionado == "Personalizado":
         st.sidebar.warning("Selecione a data de início e fim no calendário para carregar.")
         st.stop()
 
-# --- NOVO: FILTRO MEUS CASOS ---
 filtro_meus_casos = st.sidebar.toggle("🙋‍♂️ Ver apenas Meus Casos", value=False)
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 
@@ -489,11 +589,9 @@ df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados,
 lista_proprietarios = get_owner_options(user, pwd, token)
 api_user_id = get_api_user_id(user, pwd, token)
 
-# Aplicação do Filtro "Meus Casos"
 if filtro_meus_casos and not df_filtrado.empty and api_user_id:
     df_filtrado = df_filtrado[df_filtrado['ID do Proprietário'] == api_user_id]
 
-# Aplicação da Busca Global
 if busca_global and not df_filtrado.empty:
     mask = (
         df_filtrado['Número'].astype(str).str.contains(busca_global, case=False, na=False) |
@@ -501,7 +599,6 @@ if busca_global and not df_filtrado.empty:
     )
     df_filtrado = df_filtrado[mask]
 
-# --- ORDENAÇÃO DAS FILAS ---
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
 if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
     todas_filas.remove("ATRIBUÍDO AO USUÁRIO")
@@ -526,7 +623,6 @@ elif st.session_state.fila_selecionada is None:
             st.markdown("<br>", unsafe_allow_html=True)
 
 else:
-    # VISÃO 2: TELA DE DETALHES
     fila_atual = st.session_state.fila_selecionada
     
     st.markdown("""
@@ -546,7 +642,6 @@ else:
     
     df_view = df_filtrado[df_filtrado['Fila Principal'] == fila_atual].copy()
     
-    # --- SISTEMA DE FILTROS DINÂMICOS NA VISÃO DE DETALHE ---
     col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
     
     with col_f1:
@@ -569,10 +664,8 @@ else:
             
     st.markdown("<br>", unsafe_allow_html=True)
             
-    # --- SISTEMA DE ABAS ---
     tab1, tab2 = st.tabs(["📊 Indicadores Operacionais", "🛠️ Ações em Massa & Extrato"])
 
-    # === ABA 1: INDICADORES ===
     with tab1:
         vol = len(df_view)
         trat = len(df_view[df_view['Macro Status'] == '🟡 Em Tratativa'])
@@ -634,12 +727,10 @@ else:
             else:
                 st.info("Nenhum dado de SLA para exibir neste filtro.")
 
-    # === ABA 2: EXTRATO E AÇÕES EM MASSA ===
     with tab2:
-        # --- NOVA ORDENAÇÃO DE COLUNAS PERFEITA ---
         colunas_ordem_ideal = [
             'Número', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo',
-            'SLA (Prazo)', 'Status', 'Link Salesforce', 'Descrição', 
+            'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 'Link Salesforce', 'Descrição', 
             'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'Conta', 'ID do Caso', 'ID do Proprietário'
         ]
         df_view = df_view[colunas_ordem_ideal]
@@ -681,13 +772,15 @@ else:
         with container_acoes:
             if not casos_selecionados.empty:
                 st.markdown(f"**⚡ Ações Disponíveis para {len(casos_selecionados)} caso(s) selecionado(s):**")
-                c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 2])
+                c_btn1, c_btn2, c_btn3, c_btn4 = st.columns([1.2, 1, 1, 2])
                 
                 with c_btn1:
                     if st.button("🔄 Transferir e Comentar", use_container_width=True):
                         modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
-                
                 with c_btn2:
+                    if st.button("🎯 Roteamento BaseCorp", use_container_width=True):
+                        modal_basecorp(casos_selecionados, lista_proprietarios, api_user_id)
+                with c_btn3:
                     if st.button("🔔 Criar Follow-up", use_container_width=True):
                         modal_followup(casos_selecionados, lista_proprietarios)
 
