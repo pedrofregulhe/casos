@@ -15,7 +15,6 @@ except ImportError:
     HAS_AUTOREFRESH = False
 
 # --- CONFIGURAÇÃO DE CAMPOS DO SALESFORCE ---
-# A ponte perfeita: Pula para o FOZ_Asset e pega o FOZ_CodigoItem__c lá dentro!
 CAMPO_ITEM_CONTRATO = 'FOZ_Asset__r.FOZ_CodigoItem__c'
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -117,7 +116,6 @@ def load_basecorp():
     except Exception as e:
         return {}
 
-# 🛡️ Função extratora blindada que navega pelos relacionamentos do Salesforce
 def extract_field(record, field_path):
     parts = field_path.split('.')
     val = record
@@ -174,11 +172,13 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # Consulta atualizada com FOZ_SubStatus__c
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
         Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, OwnerId, Owner.Name, 
+        FOZ_SubStatus__c,
         {CAMPO_ITEM_CONTRATO},
         (SELECT IsViolated, TargetDate FROM CaseMilestones ORDER BY TargetDate ASC),
         (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
@@ -281,7 +281,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
                 classificacao = record['Account']['FOZ_Classificacao__c']
                 
-            # Extração do número do contrato através do Lookup
             raw_item_contrato = extract_field(record, CAMPO_ITEM_CONTRATO).strip()
             item_contrato_limpo = raw_item_contrato.lstrip('0') if raw_item_contrato else ""
             if raw_item_contrato and not item_contrato_limpo: 
@@ -320,6 +319,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'Origem': record['Origin'],
                 'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
                 'Motivo': record['FOZ_Motivo__c'],
+                'Substatus': record['FOZ_SubStatus__c'] if record['FOZ_SubStatus__c'] else "",
                 'SLA (Prazo)': sla_visual,
                 'Status': record['Status'],
                 'BaseCorp Carteira': carteira_basecorp,
@@ -722,7 +722,7 @@ else:
 
     with tab2:
         colunas_ordem_ideal = [
-            'Número', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo',
+            'Número', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo', 'Substatus',
             'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 'Link Salesforce', 'Descrição', 
             'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'Conta', 'ID do Caso', 'ID do Proprietário'
         ]
@@ -735,12 +735,12 @@ else:
         container_rodape = st.container()
         
         with container_tabela:
-            st.caption("💡 **Dica:** Marque a caixa 'Selecionar' na tabela para exibir as **Ações em Massa** no topo. Dê dois cliques no **Status/Motivo** para editar e salvar.")
+            st.caption("💡 **Dica:** Marque a caixa 'Selecionar' na tabela para exibir as **Ações em Massa** no topo. Dê dois cliques no **Status/Motivo/Substatus** para editar e salvar.")
 
             def colorir_linha(row):
                 return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
 
-            colunas_bloqueadas = df_view.columns.drop(['Selecionar', 'Status', 'Motivo']).tolist()
+            colunas_bloqueadas = df_view.columns.drop(['Selecionar', 'Status', 'Motivo', 'Substatus']).tolist()
 
             edited_df = st.data_editor(
                 df_view.style.apply(colorir_linha, axis=1),
@@ -752,7 +752,8 @@ else:
                     "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
                     "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
                     "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
-                    "Descrição": st.column_config.TextColumn("Descrição", width="large")
+                    "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+                    "Substatus": st.column_config.SelectboxColumn("Substatus", options=["Sucesso", "Insucesso", "Indevido", ""])
                 },
                 disabled=colunas_bloqueadas,
                 use_container_width=True,
@@ -780,7 +781,16 @@ else:
         with container_rodape:
             st.markdown("---")
             
-            df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
+            # --- VACINA CONTRA O BUG DE COMPARAÇÃO DO PANDAS ---
+            df_view_safe = df_view.fillna('')
+            edited_df_safe = edited_df.fillna('')
+            
+            df_alteracoes = edited_df[
+                (edited_df_safe['Status'] != df_view_safe['Status']) | 
+                (edited_df_safe['Motivo'] != df_view_safe['Motivo']) |
+                (edited_df_safe['Substatus'] != df_view_safe['Substatus'])
+            ]
+            
             if not df_alteracoes.empty:
                 st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
                 if st.button("💾 Salvar Alterações no Salesforce", type="primary"):
@@ -796,7 +806,15 @@ else:
                                     if dono_original != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
                                         
-                                    sf.Case.update(id_caso, {'Status': row['Status'], 'FOZ_Motivo__c': row['Motivo']}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                                    payload_update = {
+                                        'Status': row['Status'], 
+                                        'FOZ_Motivo__c': row['Motivo']
+                                    }
+                                    
+                                    sub_val = row['Substatus'] if pd.notna(row['Substatus']) and row['Substatus'] != "" else None
+                                    payload_update['FOZ_SubStatus__c'] = sub_val
+                                    
+                                    sf.Case.update(id_caso, payload_update, headers={'Sforce-Auto-Assign': 'FALSE'})
                                     
                                     if dono_original != api_user_id:
                                         sf.Case.update(id_caso, {'OwnerId': dono_original}, headers={'Sforce-Auto-Assign': 'FALSE'})
