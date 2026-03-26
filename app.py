@@ -5,7 +5,6 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
 import time
-import os
 
 # Tenta importar o autorefresh para a Atualização Automática
 try:
@@ -16,6 +15,19 @@ except ImportError:
 
 # --- CONFIGURAÇÃO DE CAMPOS DO SALESFORCE ---
 CAMPO_ITEM_CONTRATO = 'FOZ_Asset__r.FOZ_CodigoItem__c'
+
+# --- CREDENCIAIS SEGURAS (SECRETS) ---
+try:
+    SF_USER = st.secrets["SF_USERNAME"]
+    SF_PWD = st.secrets["SF_PASSWORD"]
+    SF_TOKEN = st.secrets["SF_TOKEN"]
+    
+    # Credenciais da Tela de Login do Painel
+    APP_USER = st.secrets["APP_USER"]
+    APP_PWD = st.secrets["APP_PWD"]
+except Exception:
+    st.error("⚠️ Configuração de Secrets ausente. Configure SF_USERNAME, SF_PASSWORD, SF_TOKEN, APP_USER e APP_PWD no Streamlit Cloud.")
+    st.stop()
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
@@ -51,58 +63,46 @@ st.markdown("""
 fuso_br = timezone(timedelta(hours=-3))
 
 # --- CONTROLE DE ESTADO & SESSÃO ---
+if 'app_authenticated' not in st.session_state:
+    st.session_state.app_authenticated = False
 if 'fila_selecionada' not in st.session_state:
     st.session_state.fila_selecionada = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
-if 'sf_authenticated' not in st.session_state:
-    st.session_state.sf_authenticated = False
-if 'sf_username' not in st.session_state:
-    st.session_state.sf_username = ""
-if 'sf_password' not in st.session_state:
-    st.session_state.sf_password = ""
-if 'sf_token' not in st.session_state:
-    st.session_state.sf_token = ""
 
-# --- TELA DE LOGIN ---
-if not st.session_state.sf_authenticated:
+# --- TELA DE LOGIN DO PAINEL ---
+if not st.session_state.app_authenticated:
     col_vazia1, col_login, col_vazia2 = st.columns([1, 2, 1])
     with col_login:
-        st.markdown("<h2 style='text-align: center; color: #0c1c2b; margin-top: 50px;'>🔐 Login Operacional</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #6c757d; margin-bottom: 30px;'>Conecte-se com suas credenciais do Salesforce para gerenciar os casos em seu nome.</p>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align: center; color: #0c1c2b; margin-top: 50px;'>🔐 Acesso ao Painel de Casos</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #6c757d; margin-bottom: 30px;'>Insira suas credenciais de acesso ao sistema.</p>", unsafe_allow_html=True)
         
         with st.form("login_form"):
-            st.info("ℹ️ **Segurança:** O painel NÃO salva sua senha em nenhum banco de dados. As credenciais são usadas apenas enquanto essa janela estiver aberta.")
-            user_input = st.text_input("👤 Usuário (E-mail Salesforce)")
+            user_input = st.text_input("👤 Usuário")
             pwd_input = st.text_input("🔑 Senha", type="password")
-            token_input = st.text_input("🛡️ Token de Segurança", type="password")
             
             st.markdown("<div class='btn-login'>", unsafe_allow_html=True)
             submitted = st.form_submit_button("Entrar no Painel", use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
             
             if submitted:
-                if user_input and pwd_input and token_input:
-                    try:
-                        with st.spinner("Autenticando no Salesforce..."):
-                            Salesforce(username=user_input, password=pwd_input, security_token=token_input, domain='login')
-                            st.session_state.sf_authenticated = True
-                            st.session_state.sf_username = user_input
-                            st.session_state.sf_password = pwd_input
-                            st.session_state.sf_token = token_input
-                            st.rerun()
-                    except Exception as e:
-                        st.error("❌ Falha na autenticação. Verifique seu usuário, senha e token de segurança.")
+                if user_input == APP_USER and pwd_input == APP_PWD:
+                    st.session_state.app_authenticated = True
+                    st.rerun()
                 else:
-                    st.warning("⚠️ Por favor, preencha todos os campos.")
+                    st.error("❌ Usuário ou senha incorretos.")
     st.stop()
 
-# --- CONEXÃO DINÂMICA ---
+# --- CONEXÃO DINÂMICA COM SALESFORCE ---
 @st.cache_resource
 def init_connection(user, pwd, token):
     return Salesforce(username=user, password=pwd, security_token=token, domain='login')
 
-sf = init_connection(st.session_state.sf_username, st.session_state.sf_password, st.session_state.sf_token)
+try:
+    sf = init_connection(SF_USER, SF_PWD, SF_TOKEN)
+except Exception as e:
+    st.error(f"❌ Falha ao conectar com o Salesforce usando as credenciais do sistema: {e}")
+    st.stop()
 
 # --- LEITURA DA BASECORP (EXCEL) ---
 @st.cache_data(ttl=3600)
@@ -349,36 +349,58 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         st.error(f"Erro de comunicação com o Salesforce: {e}")
         return pd.DataFrame()
 
-# --- FUNÇÕES DE MODAIS (POP-UPS) ---
 
-# 1. NOVO MODAL: RESUMO DIÁRIO
+# --- FUNÇÕES DE MODAIS E AUDITORIA AUTOMÁTICA ---
+
+def criar_comentario_auditoria(num_caso, id_caso, extra_texto=""):
+    texto_base = "Caso editado ou movimentado via Automação."
+    if extra_texto.strip():
+        texto_base += f"\n\nObservação: {extra_texto}"
+    return {'ParentId': id_caso, 'CommentBody': texto_base}
+
 @st.dialog("📄 Resumo Diário da Operação")
-def modal_resumo_diario(df_dados):
+def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
     if df_dados.empty:
         st.warning("Não há dados para resumir. Verifique os filtros de período.")
         return
         
     hoje_str = datetime.now(fuso_br).strftime("%d/%m/%Y às %H:%M")
     
-    # Cálculos Gerais
+    if per_sel == "Personalizado" and dt_ini and dt_fim:
+        periodo_txt = f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
+    else:
+        periodo_txt = per_sel
+    
     vol_total = len(df_dados)
     trat_total = len(df_dados[df_dados['Macro Status'] == '🟡 Em Tratativa'])
     fech_total = len(df_dados[df_dados['Macro Status'] == '🟢 Fechado'])
     atr_total = len(df_dados[(df_dados['SLA Macro'] == '🔴 Atrasado') & (df_dados['Macro Status'] == '🟡 Em Tratativa')])
     
-    resumo = f"📊 *STATUS DA OPERAÇÃO - Atualizado em {hoje_str}*\n\n"
-    resumo += f"📈 *VISÃO GERAL*\n"
-    resumo += f"▪️ Total de Casos (Período): {vol_total}\n"
-    resumo += f"▪️ Casos Abertos / Em Tratativa: {trat_total}\n"
+    resumo = f"📊 *STATUS DA OPERAÇÃO - Atualizado em {hoje_str}*\n"
+    resumo += f"📅 *Período Base Consultado:* {periodo_txt}\n\n"
+    
+    resumo += f"📈 *VISÃO GERAL DA BASE*\n"
+    resumo += f"▪️ Total de Casos: {vol_total}\n"
+    resumo += f"▪️ Casos Abertos (Em Tratativa): {trat_total}\n"
     resumo += f"▪️ Casos Fechados: {fech_total}\n"
     resumo += f"▪️ SLA Atrasado (Em Aberto): {atr_total}\n\n"
     
-    resumo += f"🏢 *DETALHAMENTO POR FILA*\n"
+    resumo += f"🎯 *DESTAQUES OPERACIONAIS*\n"
+    for fila_destaque in ["ATRIBUÍDO AO USUÁRIO", "CORPORATIVO"]:
+        df_destaque = df_dados[df_dados['Fila Principal'] == fila_destaque]
+        if not df_destaque.empty:
+            vol_d = len(df_destaque)
+            abertos_d = len(df_destaque[df_destaque['Macro Status'] == '🟡 Em Tratativa'])
+            atr_d = len(df_destaque[(df_destaque['SLA Macro'] == '🔴 Atrasado') & (df_destaque['Macro Status'] == '🟡 Em Tratativa')])
+            resumo += f"🔸 *{fila_destaque}:* {vol_d} Casos no total | {abertos_d} Abertos | {atr_d} Atrasados\n"
     
-    # Agrupa por Fila Principal (removendo "ATRIBUÍDO AO USUÁRIO" da conta visual se quiser, ou mantendo)
+    resumo += f"\n🏢 *DETALHAMENTO POR FILA GERAL*\n"
     filas = sorted(df_dados['Fila Principal'].dropna().unique().tolist())
     
     for fila in filas:
+        if fila in ["ATRIBUÍDO AO USUÁRIO", "CORPORATIVO"]:
+            continue 
+            
         df_fila = df_dados[df_dados['Fila Principal'] == fila]
         vol = len(df_fila)
         trat = len(df_fila[df_fila['Macro Status'] == '🟡 Em Tratativa'])
@@ -395,12 +417,11 @@ def modal_resumo_diario(df_dados):
         resumo += f"   Total: {vol} | Abertos: {trat} | Fechados: {fech}\n"
         resumo += f"   SLA Atrasado: {atr} | TMA Médio: {tma_str}\n"
 
-    st.markdown("💡 **Clique no ícone de 'Copiar'** no canto superior direito do quadro abaixo para copiar todo o texto formatado para o seu e-mail ou WhatsApp.")
+    st.markdown("💡 **Clique no ícone de 'Copiar'** no canto superior direito do quadro abaixo para copiar todo o texto formatado para o seu e-mail ou comunicador corporativo.")
     st.code(resumo, language="markdown")
 
-# 2. MODAL TRANSFERIR E COMENTAR
 @st.dialog("🔄 Transferir e Comentar")
-def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
+def modal_transferir_comentar(casos_selecionados_df, lista_prop):
     st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
     
     casos_com_basecorp = casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-']
@@ -419,16 +440,26 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     else:
         st.caption("💡 Os casos com BaseCorp serão enviados para as carteiras correspondentes. Casos sem mapeamento exigirão transferência manual depois.")
         
-    novo_comentario = st.text_area("Adicionar Comentário:", placeholder="(Opcional) Deixe em branco se quiser apenas transferir...", height=100)
+    novo_comentario = st.text_area("Adicionar Comentário Opcional:", height=68)
+    
+    st.markdown("---")
+    st.markdown("**🛡️ Segurança e Auditoria**")
+    sem_comentario = st.checkbox("Movimentar sem inserir o comentário padrão de automação", value=False)
+    senha_input = st.text_input("🔑 Senha do Salesforce (*Obrigatória*)", type="password")
     
     if st.button("Confirmar Transferência", type="primary", use_container_width=True):
+        if senha_input != SF_PWD:
+            st.error("⚠️ Senha incorreta. Operação cancelada.")
+            return
+            
         if modo_transferencia.startswith("Manual") and not dono_selecionado:
             st.warning("⚠️ Por favor, selecione um proprietário para transferir.")
             return
             
-        with st.spinner("Processando atualizações no Salesforce..."):
+        with st.spinner("Processando atualizações e validando regras no Salesforce..."):
             sucessos = 0
             erros = []
+            comentarios_payload = []
             
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
@@ -457,21 +488,25 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                         continue
                 
                 try:
-                    # ROTEAMENTO DIRETO COM CHAVE MESTRA
                     payload = {'OwnerId': novo_id, 'FOZ_Bypass_Flow__c': True}
                     sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
                     sf.Case.update(id_caso, {'FOZ_Bypass_Flow__c': False}, headers={'Sforce-Auto-Assign': 'FALSE'})
                     sucessos += 1
+                    
+                    if not sem_comentario or novo_comentario.strip():
+                        if not sem_comentario:
+                            comentarios_payload.append(criar_comentario_auditoria(num_caso, id_caso, novo_comentario))
+                        elif novo_comentario.strip():
+                            comentarios_payload.append({'ParentId': id_caso, 'CommentBody': novo_comentario})
+                            
                 except Exception as e:
                     erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
             
-            if novo_comentario.strip() and sucessos > 0:
+            if comentarios_payload:
                 try:
-                    payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows() if row['Status'] not in ['Closed', 'Fechado']]
-                    if payload:
-                        sf.bulk.CaseComment.insert(payload)
+                    sf.bulk.CaseComment.insert(comentarios_payload)
                 except Exception as e:
-                    erros.append(f"Erro ao inserir comentários: {str(e)}")
+                    erros.append(f"Erro ao inserir comentários de auditoria: {str(e)}")
             
             if erros:
                 for err in erros: st.error(err)
@@ -481,9 +516,8 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
-# 3. MODAL EDITAR CASOS
 @st.dialog("📝 Editar Casos")
-def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
+def modal_editar_casos(casos_selecionados_df, df_view):
     st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
     
     opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
@@ -495,7 +529,16 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
     opcoes_substatus = ["Sucesso", "Insucesso", "Indevido", "Limpar Campo (Vazio)"]
     novo_substatus = st.selectbox("Novo Substatus:", opcoes_substatus, index=None, placeholder="Selecione para alterar...")
     
+    st.markdown("---")
+    st.markdown("**🛡️ Segurança e Auditoria**")
+    sem_comentario = st.checkbox("Movimentar sem inserir o comentário padrão de automação", value=False)
+    senha_input = st.text_input("🔑 Senha do Salesforce (*Obrigatória*)", type="password")
+    
     if st.button("💾 Confirmar Edições", type="primary", use_container_width=True):
+        if senha_input != SF_PWD:
+            st.error("⚠️ Senha incorreta. Operação cancelada.")
+            return
+            
         if not novo_status and not novo_substatus:
             st.warning("Nenhuma alteração selecionada.")
             return
@@ -503,12 +546,12 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
         with st.spinner("Processando edições no Salesforce..."):
             sucessos = 0
             erros = []
+            comentarios_payload = []
             
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
                 
-                # EDIÇÃO DIRETA COM CHAVE MESTRA
                 payload = {'FOZ_Bypass_Flow__c': True}
                 if novo_status: payload['Status'] = novo_status
                 if novo_substatus: 
@@ -518,8 +561,18 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                     sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
                     sf.Case.update(id_caso, {'FOZ_Bypass_Flow__c': False}, headers={'Sforce-Auto-Assign': 'FALSE'})
                     sucessos += 1
+                    
+                    if not sem_comentario:
+                        comentarios_payload.append(criar_comentario_auditoria(num_caso, id_caso, f"Edição em Lote - Status: {novo_status if novo_status else 'Mantido'} | Substatus: {novo_substatus if novo_substatus else 'Mantido'}"))
+                        
                 except Exception as e:
                     erros.append(f"Erro no caso {num_caso}: {str(e)}")
+            
+            if comentarios_payload:
+                try:
+                    sf.bulk.CaseComment.insert(comentarios_payload)
+                except:
+                    pass
                     
             if erros:
                 for err in erros: st.error(err)
@@ -529,7 +582,6 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
                 st.cache_data.clear()
                 st.rerun()
 
-# 4. MODAL FOLLOW-UP
 @st.dialog("🔔 Criar Tarefa de Follow-up")
 def modal_followup(casos_selecionados_df, lista_prop):
     st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
@@ -537,7 +589,16 @@ def modal_followup(casos_selecionados_df, lista_prop):
     users_followup = st.multiselect("Notificar / Atribuir Tarefa para (Selecione vários se desejar):", list(lista_prop.keys()))
     descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=100)
     
+    st.markdown("---")
+    st.markdown("**🛡️ Segurança e Auditoria**")
+    sem_comentario = st.checkbox("Movimentar sem inserir o comentário padrão de automação", value=False)
+    senha_input = st.text_input("🔑 Senha do Salesforce (*Obrigatória*)", type="password")
+    
     if st.button("Confirmar Follow-up", type="primary", use_container_width=True):
+        if senha_input != SF_PWD:
+            st.error("⚠️ Senha incorreta. Operação cancelada.")
+            return
+            
         if not users_followup or not descricao_followup.strip():
             st.warning("⚠️ Selecione pelo menos um usuário e digite a descrição da tarefa.")
             return
@@ -545,18 +606,30 @@ def modal_followup(casos_selecionados_df, lista_prop):
         with st.spinner("Registrando tarefas no Salesforce..."):
             try:
                 payload = []
+                comentarios_payload = []
+                
                 for user_nome in users_followup:
                     dono_id_tarefa = lista_prop[user_nome]
                     for _, row in casos_selecionados_df.iterrows():
+                        id_caso = row['ID do Caso']
                         payload.append({
-                            'WhatId': row['ID do Caso'],
+                            'WhatId': id_caso,
                             'OwnerId': dono_id_tarefa,
                             'Subject': 'Ação Requerida',
                             'Description': descricao_followup,
                             'Status': 'Open',
                             'Priority': 'Normal'
                         })
+                        if not sem_comentario:
+                            comentarios_payload.append(criar_comentario_auditoria(row['Número'], id_caso, "Nova Tarefa de Follow-up criada."))
+                            
                 sf.bulk.Task.insert(payload)
+                
+                if comentarios_payload:
+                    comentarios_unicos = {c['ParentId']: c for c in comentarios_payload}.values()
+                    try: sf.bulk.CaseComment.insert(list(comentarios_unicos))
+                    except: pass
+                    
                 st.toast(f"✅ {len(payload)} Tarefas de Follow-up criadas com sucesso!")
                 time.sleep(1.5)
                 st.cache_data.clear()
@@ -596,22 +669,21 @@ try:
 except Exception:
     st.sidebar.markdown("<h2>Filtros</h2>", unsafe_allow_html=True)
 
-st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
+st.sidebar.markdown(f"**Conexão Estabelecida:**<br> <span style='color: #0056b3; font-size: 14px;'>{SF_USER}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
 if HAS_AUTOREFRESH:
     modo_tv = st.sidebar.toggle("⏱️ Atualização Automática (5 min)")
     if modo_tv:
         st_autorefresh(interval=5 * 60 * 1000, key="data_refresh")
-else:
-    st.sidebar.caption("💡 Para habilitar a Atualização Automática, instale o pacote via terminal: `pip install streamlit-autorefresh`")
 
 st.sidebar.markdown("---")
 
-# AQUI ESTÁ O NOVO BOTÃO DE RESUMO!
 if st.sidebar.button("📄 Gerar Resumo Diário", type="primary", use_container_width=True):
-    # Passamos o df_filtrado que contém os dados da tela principal
-    modal_resumo_diario(st.session_state.get('last_df', pd.DataFrame())) # Será atualizado abaixo
+    per_sel = st.session_state.get('last_periodo', "Últimos 30 Dias")
+    dt_ini = st.session_state.get('last_dt_inicio', None)
+    dt_fim = st.session_state.get('last_dt_fim', None)
+    modal_resumo_diario(st.session_state.get('last_df', pd.DataFrame()), per_sel, dt_ini, dt_fim)
 
 busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
 
@@ -626,11 +698,8 @@ if st.sidebar.button("🔄 Sincronizar Agora", use_container_width=True):
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
     st.rerun()
 
-if st.sidebar.button("🚪 Sair (Logout)", use_container_width=True):
-    st.session_state.sf_authenticated = False
-    st.session_state.sf_username = ""
-    st.session_state.sf_password = ""
-    st.session_state.sf_token = ""
+if st.sidebar.button("🚪 Sair do Painel", use_container_width=True):
+    st.session_state.app_authenticated = False
     st.session_state.fila_selecionada = None
     st.cache_data.clear()
     st.cache_resource.clear()
@@ -649,13 +718,16 @@ if periodo_selecionado == "Personalizado":
         st.sidebar.warning("Selecione a data de início e fim no calendário para carregar.")
         st.stop()
 
+st.session_state.last_periodo = periodo_selecionado
+st.session_state.last_dt_inicio = dt_inicio
+st.session_state.last_dt_fim = dt_fim
+
 filtro_meus_casos = st.sidebar.toggle("🙋‍♂️ Ver apenas Meus Casos", value=False)
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 
-user, pwd, token = st.session_state.sf_username, st.session_state.sf_password, st.session_state.sf_token
-df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, user, pwd, token)
-lista_proprietarios = get_owner_options(user, pwd, token)
-api_user_id = get_api_user_id(user, pwd, token)
+df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, SF_USER, SF_PWD, SF_TOKEN)
+lista_proprietarios = get_owner_options(SF_USER, SF_PWD, SF_TOKEN)
+api_user_id = get_api_user_id(SF_USER, SF_PWD, SF_TOKEN)
 
 if filtro_meus_casos and not df_filtrado.empty and api_user_id:
     df_filtrado = df_filtrado[df_filtrado['ID do Proprietário'] == api_user_id]
@@ -667,7 +739,6 @@ if busca_global and not df_filtrado.empty:
     )
     df_filtrado = df_filtrado[mask]
 
-# Armazena na sessão para o botão de resumo funcionar independente da renderização sequencial
 st.session_state.last_df = df_filtrado.copy() if not df_filtrado.empty else pd.DataFrame()
 
 todas_filas = df_filtrado['Fila Principal'].unique().tolist() if not df_filtrado.empty else []
