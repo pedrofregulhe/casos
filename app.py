@@ -353,6 +353,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 # --- FUNÇÕES DE MODAIS E AUDITORIA AUTOMÁTICA ---
 
 def criar_comentario_auditoria(num_caso, id_caso, extra_texto=""):
+    """Gera o payload de comentário de automação padrão."""
     texto_base = "Caso editado ou movimentado via Automação."
     if extra_texto.strip():
         texto_base += f"\n\nObservação: {extra_texto}"
@@ -393,8 +394,19 @@ def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
             abertos_d = len(df_destaque[df_destaque['Macro Status'] == '🟡 Em Tratativa'])
             atr_d = len(df_destaque[(df_destaque['SLA Macro'] == '🔴 Atrasado') & (df_destaque['Macro Status'] == '🟡 Em Tratativa')])
             resumo += f"🔸 *{fila_destaque}:* {vol_d} Casos no total | {abertos_d} Abertos | {atr_d} Atrasados\n"
-    
-    resumo += f"\n🏢 *DETALHAMENTO POR FILA GERAL*\n"
+            
+            # Detalhamento de subfilas
+            subfilas = sorted(df_destaque['Subfila'].dropna().unique().tolist())
+            for sub in subfilas:
+                if sub == "-": continue
+                df_sub = df_destaque[df_destaque['Subfila'] == sub]
+                vol_s = len(df_sub)
+                abertos_s = len(df_sub[df_sub['Macro Status'] == '🟡 Em Tratativa'])
+                atr_s = len(df_sub[(df_sub['SLA Macro'] == '🔴 Atrasado') & (df_sub['Macro Status'] == '🟡 Em Tratativa')])
+                resumo += f"   ↳ {sub}: {vol_s} Total | {abertos_s} Abertos | {atr_s} Atrasados\n"
+            resumo += "\n"
+            
+    resumo += f"🏢 *DETALHAMENTO POR FILA GERAL*\n"
     filas = sorted(df_dados['Fila Principal'].dropna().unique().tolist())
     
     for fila in filas:
@@ -421,7 +433,7 @@ def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
     st.code(resumo, language="markdown")
 
 @st.dialog("🔄 Transferir e Comentar")
-def modal_transferir_comentar(casos_selecionados_df, lista_prop):
+def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
     st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
     
     casos_com_basecorp = casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-']
@@ -517,7 +529,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop):
                 st.rerun()
 
 @st.dialog("📝 Editar Casos")
-def modal_editar_casos(casos_selecionados_df, df_view):
+def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
     st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
     
     opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
