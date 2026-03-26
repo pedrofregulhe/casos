@@ -3,3 +3,4 @@ pandas
 simple-salesforce
 plotly
 openpyxl
+streamlit-autorefresh
