@@ -7,7 +7,7 @@ import plotly.express as px
 import time
 import os
 
-# Tenta importar o autorefresh para o Modo TV
+# Tenta importar o autorefresh para a Atualização Automática
 try:
     from streamlit_autorefresh import st_autorefresh
     HAS_AUTOREFRESH = True
@@ -15,8 +15,9 @@ except ImportError:
     HAS_AUTOREFRESH = False
 
 # --- CONFIGURAÇÃO DE CAMPOS DO SALESFORCE ---
-# Alterado para buscar o código do item diretamente no objeto
-CAMPO_ITEM_CONTRATO = 'FOZ_CodigoItem__c'
+# ⚠️ ATENÇÃO: O Salesforce rejeitou o 'FOZ_CodigoItem__c'. Voltei para o anterior para não quebrar a tela.
+# Descubra o "Nome da API" exato do seu campo de Item de Contrato e altere aqui dentro das aspas:
+CAMPO_ITEM_CONTRATO = 'FOZ_Asset__r.Name'
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
@@ -109,20 +110,14 @@ sf = init_connection(st.session_state.sf_username, st.session_state.sf_password,
 @st.cache_data(ttl=3600)
 def load_basecorp():
     try:
-        # Lê o arquivo Excel local do repositório
         df = pd.read_excel('basecorp.xlsx')
         df.columns = df.columns.str.lower().str.strip()
-        
-        # Garante o formato texto, tira zeros invisíveis (ex: .0 do Excel) e limpa zeros à esquerda
         df['itemcontrato'] = df['itemcontrato'].astype(str).str.replace('\.0$', '', regex=True).str.strip().str.lstrip('0')
         df['carteira'] = df['carteira'].astype(str).str.strip()
-        
-        # Transforma em dicionário { '24560': 'Carteira A', '12345': 'Carteira B' }
         return dict(zip(df['itemcontrato'], df['carteira']))
     except Exception as e:
         return {}
 
-# Função auxiliar para extrair campo dinâmico
 def extract_field(record, field_path):
     parts = field_path.split('.')
     val = record
@@ -286,12 +281,9 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
                 classificacao = record['Account']['FOZ_Classificacao__c']
                 
-            # --- INTEGRAÇÃO COM BASECORP ---
             raw_item_contrato = extract_field(record, CAMPO_ITEM_CONTRATO).strip()
-            
-            # Remove os zeros à esquerda APENAS para buscar no dicionário do Excel
             item_contrato_limpo = raw_item_contrato.lstrip('0') if raw_item_contrato else ""
-            if raw_item_contrato and not item_contrato_limpo: # Caso fosse '000000'
+            if raw_item_contrato and not item_contrato_limpo: 
                 item_contrato_limpo = "0"
                 
             carteira_basecorp = basecorp_dict.get(item_contrato_limpo, "-") if item_contrato_limpo else "-"
@@ -330,7 +322,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'SLA (Prazo)': sla_visual,
                 'Status': record['Status'],
                 'BaseCorp Carteira': carteira_basecorp,
-                'Item de Contrato': raw_item_contrato, # Mantém o original com zeros na tabela visual
+                'Item de Contrato': raw_item_contrato, 
                 'Descrição': descricao_final,
                 'Fila Principal': fila_principal,
                 'Subfila': subfila,
@@ -537,12 +529,13 @@ except Exception:
 st.sidebar.markdown(f"**Logado como:**<br> <span style='color: #0056b3; font-size: 14px;'>{st.session_state.sf_username}</span>", unsafe_allow_html=True)
 st.sidebar.caption(f"Última Sincronização: {st.session_state.last_update}")
 
+# --- ATUALIZAÇÃO AUTOMÁTICA ---
 if HAS_AUTOREFRESH:
-    modo_tv = st.sidebar.toggle("⏱️ Modo TV (Atualiza a cada 5 min)")
+    modo_tv = st.sidebar.toggle("⏱️ Atualização Automática (5 min)")
     if modo_tv:
         st_autorefresh(interval=5 * 60 * 1000, key="data_refresh")
 else:
-    st.sidebar.caption("💡 Para habilitar o Modo TV (Auto-Refresh), instale o pacote via terminal: `pip install streamlit-autorefresh`")
+    st.sidebar.caption("💡 Para habilitar a Atualização Automática, instale o pacote via terminal: `pip install streamlit-autorefresh`")
 
 st.sidebar.markdown("---")
 busca_global = st.sidebar.text_input("🔍 Busca Rápida (Nº do Caso ou Conta)")
