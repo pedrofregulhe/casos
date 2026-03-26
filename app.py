@@ -168,10 +168,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
       {filtro_status}
     """
     
-    # CORREÇÃO AQUI: URL Base voltou pro código!
     sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
-    
-    # --- INÍCIO DA BARRA DE PROGRESSO ---
     my_bar = st.progress(0, text="Iniciando sincronização com o Salesforce...")
     
     try:
@@ -296,6 +293,93 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         my_bar.empty()
         st.error(f"Erro de comunicação com o Salesforce: {e}")
         return pd.DataFrame()
+
+# --- FUNÇÕES DE MODAIS (POP-UPS) ---
+@st.dialog("🔄 Transferir e Comentar")
+def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
+    st.markdown(f"Você está executando ação em **{len(casos_selecionados_df)} caso(s)**.")
+    
+    dono_selecionado = st.selectbox("Selecione o Novo Proprietário (*Obrigatório*):", [""] + list(lista_prop.keys()))
+    novo_comentario = st.text_area("Adicionar Comentário:", placeholder="(Opcional) Deixe em branco se quiser apenas transferir...", height=100)
+    
+    if st.button("🚀 Confirmar Ação", type="primary", use_container_width=True):
+        if not dono_selecionado:
+            st.warning("⚠️ Por favor, selecione um proprietário para transferir.")
+            return
+        if not api_usr_id:
+            st.error("⚠️ Erro: Não foi possível identificar seu usuário da API.")
+            return
+            
+        with st.spinner("Executando magia no Salesforce..."):
+            novo_id = lista_prop[dono_selecionado]
+            sucessos = 0
+            erros = []
+            
+            # Executa transferência
+            for _, row in casos_selecionados_df.iterrows():
+                id_caso = row['ID do Caso']
+                num_caso = row['Número']
+                dono_original = row['ID do Proprietário']
+                
+                try:
+                    if dono_original != api_usr_id:
+                        sf.Case.update(id_caso, {'OwnerId': api_usr_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                        
+                    if novo_id != api_usr_id:
+                        sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                        
+                    sucessos += 1
+                except Exception as e:
+                    erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
+            
+            # Se a pessoa digitou comentário, executa o comentário em lote
+            if novo_comentario.strip() and sucessos > 0:
+                try:
+                    payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados_df.iterrows()]
+                    sf.bulk.CaseComment.insert(payload)
+                except Exception as e:
+                    erros.append(f"Erro ao inserir comentários: {str(e)}")
+            
+            if erros:
+                for err in erros: st.error(err)
+            if sucessos > 0:
+                st.toast(f"✅ {sucessos} ação(ões) concluída(s) com sucesso!")
+                time.sleep(1.5)
+                st.cache_data.clear()
+                st.rerun()
+
+@st.dialog("🔔 Criar Tarefa de Follow-up")
+def modal_followup(casos_selecionados_df, lista_prop):
+    st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
+    
+    user_followup = st.selectbox("Notificar / Atribuir Tarefa para:", [""] + list(lista_prop.keys()))
+    descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=100)
+    
+    if st.button("🔔 Confirmar Follow-up", type="primary", use_container_width=True):
+        if not user_followup or not descricao_followup.strip():
+            st.warning("⚠️ Selecione um usuário e digite a descrição da tarefa.")
+            return
+            
+        with st.spinner("Registrando tarefas no Salesforce..."):
+            try:
+                dono_id_tarefa = lista_prop[user_followup]
+                payload = []
+                for _, row in casos_selecionados_df.iterrows():
+                    payload.append({
+                        'WhatId': row['ID do Caso'],
+                        'OwnerId': dono_id_tarefa,
+                        'Subject': 'Ação Requerida',
+                        'Description': descricao_followup,
+                        'Status': 'Open',
+                        'Priority': 'Normal'
+                    })
+                sf.bulk.Task.insert(payload)
+                st.toast("✅ Tarefas de Follow-up criadas e notificadas com sucesso!")
+                time.sleep(1.5)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao criar Follow-up: {e}")
 
 # --- FUNÇÃO PARA DESENHAR O CARD QUADRADO ---
 def desenhar_card(fila_nome, df_fila):
@@ -546,7 +630,7 @@ else:
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
         with col_aviso:
-            st.caption("💡 **Dica:** Marque a caixa para realizar Ações em Massa abaixo. Dê dois cliques no **Status/Motivo** para editar a tabela e salvar.")
+            st.caption("💡 **Dica:** Selecione os casos na tabela e clique nos botões de Ação em Massa abaixo.")
 
         def colorir_linha(row):
             return ['background-color: #ffebee' if row['SLA Atrasado'] == '🔴 Atrasado' else 'background-color: #ffffff' for _ in row]
@@ -571,7 +655,7 @@ else:
             key=f"editor_{fila_atual}"
         )
         
-        # --- SALVAR ALTERAÇÕES DA TABELA ---
+        # --- SALVAR ALTERAÇÕES DA TABELA (Edição de Linha) ---
         df_alteracoes = edited_df[(edited_df['Status'] != df_view['Status']) | (edited_df['Motivo'] != df_view['Motivo'])]
         if not df_alteracoes.empty:
             st.warning(f"⚠️ Você alterou {len(df_alteracoes)} linha(s) na tabela.")
@@ -602,107 +686,18 @@ else:
 
         st.markdown("---")
 
-        # --- AÇÕES EM MASSA (TRANSFERIR, COMENTAR, FOLLOW-UP) ---
+        # --- AÇÕES EM MASSA (BOTÕES QUE ABREM OS MODAIS) ---
         casos_selecionados = edited_df[edited_df['Selecionar'] == True]
+        
         if not casos_selecionados.empty:
-            st.markdown(f"**{len(casos_selecionados)} caso(s) selecionado(s) para ações em massa:**")
+            st.markdown(f"**Ações Disponíveis para {len(casos_selecionados)} caso(s):**")
             
-            c_transf, c_coment, c_followup = st.columns(3, gap="large")
+            c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 2])
             
-            # --- 1. TRANSFERIR ---
-            with c_transf:
-                st.markdown("##### 🔄 Transferir Casos")
-                dono_selecionado = st.selectbox("Selecione o Novo Proprietário:", [""] + list(lista_proprietarios.keys()))
-                
-                if st.button("Confirmar Transferência", use_container_width=True):
-                    if not dono_selecionado:
-                        st.warning("Por favor, selecione um proprietário.")
-                    elif api_user_id is None:
-                        st.error("Erro: Não foi possível identificar seu usuário.")
-                    else:
-                        with st.spinner("Transferindo casos no Salesforce..."):
-                            novo_id = lista_proprietarios[dono_selecionado]
-                            sucessos = 0
-                            erros = []
-                            
-                            for _, row in casos_selecionados.iterrows():
-                                id_caso = row['ID do Caso']
-                                num_caso = row['Número']
-                                dono_original = row['ID do Proprietário']
-                                
-                                try:
-                                    if dono_original != api_user_id:
-                                        sf.Case.update(id_caso, {'OwnerId': api_user_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                        
-                                    if novo_id != api_user_id:
-                                        sf.Case.update(id_caso, {'OwnerId': novo_id}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                                        
-                                    sucessos += 1
-                                except Exception as e:
-                                    msg_erro = str(e)
-                                    try:
-                                        import json
-                                        msg_erro = json.loads(e.content)[0].get('message', msg_erro)
-                                    except:
-                                        pass
-                                    erros.append(f"Caso {num_caso}: {msg_erro}")
-                            
-                            if erros:
-                                st.error(f"⚠️ O Salesforce bloqueou a transferência de {len(erros)} caso(s):")
-                                for err in erros: st.warning(err)
-                            if sucessos > 0:
-                                st.toast(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
-                                time.sleep(1.5)
-                                st.cache_data.clear() 
-                                st.rerun() 
-
-            # --- 2. COMENTAR ---
-            with c_coment:
-                st.markdown("##### 💬 Comentar em Lote")
-                novo_comentario = st.text_area("Digite o comentário a ser inserido:", height=68)
-                
-                if st.button("Inserir Comentário", use_container_width=True):
-                    if novo_comentario.strip():
-                        with st.spinner("Enviando comentários..."):
-                            try:
-                                payload = [{'ParentId': row['ID do Caso'], 'CommentBody': novo_comentario} for _, row in casos_selecionados.iterrows()]
-                                sf.bulk.CaseComment.insert(payload)
-                                st.toast("✅ Comentários inseridos com sucesso!")
-                                time.sleep(1.5)
-                                st.cache_data.clear()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao inserir comentário: {e}")
-                    else:
-                        st.warning("O comentário não pode estar vazio.")
-
-            # --- 3. CRIAR FOLLOW-UP ---
-            with c_followup:
-                st.markdown("##### 🔔 Criar Follow-up")
-                user_followup = st.selectbox("Notificar / Atribuir para:", [""] + list(lista_proprietarios.keys()), key="fup_user")
-                descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=68)
-                
-                if st.button("Criar Tarefa", use_container_width=True):
-                    if not user_followup or not descricao_followup.strip():
-                        st.warning("Selecione um usuário e digite a descrição da tarefa.")
-                    else:
-                        with st.spinner("Criando tarefas de follow-up..."):
-                            try:
-                                dono_id_tarefa = lista_proprietarios[user_followup]
-                                payload = []
-                                for _, row in casos_selecionados.iterrows():
-                                    payload.append({
-                                        'WhatId': row['ID do Caso'],
-                                        'OwnerId': dono_id_tarefa,
-                                        'Subject': 'Ação Requerida',
-                                        'Description': descricao_followup,
-                                        'Status': 'Open',
-                                        'Priority': 'Normal'
-                                    })
-                                sf.bulk.Task.insert(payload)
-                                st.toast("✅ Tarefas de Follow-up criadas com sucesso!")
-                                time.sleep(1.5)
-                                st.cache_data.clear()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao criar Follow-up: {e}")
+            with c_btn1:
+                if st.button("🔄 Transferir e Comentar", use_container_width=True):
+                    modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
+            
+            with c_btn2:
+                if st.button("🔔 Criar Follow-up", use_container_width=True):
+                    modal_followup(casos_selecionados, lista_proprietarios)
