@@ -242,8 +242,9 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 chunk = case_ids[i:i+chunk_size]
                 ids_str = ",".join([f"'{cid}'" for cid in chunk])
                 
+                # ADICIONADO: LineItemNumber na Query
                 query_os = f"""
-                SELECT WorkOrder.CaseId, FOZ_Numero_OS__c, FOZ_Nome_Franquia__c, 
+                SELECT WorkOrder.CaseId, LineItemNumber, FOZ_Numero_OS__c, FOZ_Nome_Franquia__c, 
                        FOZ_Tipo_de_Servico__c, FOZ_Agendado_para_data_periodo__c, FOZ_Id_Tecnico__c
                 FROM WorkOrderLineItem 
                 WHERE WorkOrder.CaseId IN ({ids_str})
@@ -373,6 +374,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             os_info = os_dict.get(case_id, {})
             
             os_numero = str(os_info.get('FOZ_Numero_OS__c') or '')
+            os_line_item = str(os_info.get('LineItemNumber') or '') # ADICIONADO
             
             os_base_roteirizacao = str(os_info.get('FOZ_Nome_Franquia__c') or '').strip()
             if not os_base_roteirizacao: 
@@ -433,6 +435,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'Asset - Endereço': asset_end,
                 'Asset - Instalação': asset_install,
                 'OS - Número': os_numero,
+                'OS - Item de Linha': os_line_item, # ADICIONADO
                 'OS - Franquia': os_franquia_principal,
                 'OS - Base (Rota)': os_base_roteirizacao,
                 'OS - Tipo Serviço': os_tipo_servico,
@@ -970,7 +973,6 @@ elif st.session_state.fila_selecionada is not None:
         disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_oa"
     )
 
-    # CORREÇÃO APLICADA AQUI PARA O ERRO DO INDEX
     casos_selecionados = df_view[edited_df['Selecionar'].fillna(False).astype(bool).tolist()]
     
     if not casos_selecionados.empty:
@@ -1144,7 +1146,7 @@ elif st.session_state.franquia_selecionada is not None:
     
     colunas_ordem_ideal = [
         'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Conta - Posição Fin.', 'Conta - Classificação',
-        'OS - Número', 'OS - Franquia', 'OS - Base (Rota)', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Data Agendamento', 'OS - Técnico',
+        'OS - Número', 'OS - Item de Linha', 'OS - Franquia', 'OS - Base (Rota)', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Data Agendamento', 'OS - Técnico',
         'Item de Contrato', 'Asset - Status', 'Asset - Endereço', 'Asset - Instalação',
         'Abertura', 'Fechamento', 'Status', 'SLA (Prazo)', 'Substatus', 
         'Origem', 'Tipo Solicitação', 'Motivo', 'Detalhe',  
