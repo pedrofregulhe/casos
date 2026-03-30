@@ -1063,13 +1063,28 @@ elif st.session_state.franquia_selecionada is not None:
             with c2:
                 prest_disp_cap = sorted(df_cap_filtrado['Prestador de Serviço'].unique().tolist())
                 prest_sel_cap = st.multiselect("Filtrar Prestador de Serviço:", prest_disp_cap)
+            
             with c3:
-                serv_disp_cap = sorted(df_cap_filtrado['Serviços'].unique().tolist())
+                # --- TRATAMENTO PARA SERVIÇOS AGRUPADOS ---
+                servicos_unicos = set()
+                for s_row in df_cap_filtrado['Serviços'].dropna():
+                    # Quebra a string por vírgula e remove espaços extras
+                    for s_item in str(s_row).split(','):
+                        s_clean = s_item.strip()
+                        if s_clean:
+                            servicos_unicos.add(s_clean)
+                            
+                serv_disp_cap = sorted(list(servicos_unicos))
                 serv_sel_cap = st.multiselect("Filtrar Serviços:", serv_disp_cap)
                 
             if data_cap_sel: df_cap_filtrado = df_cap_filtrado[df_cap_filtrado['Data do Registro'].isin(data_cap_sel)]
             if prest_sel_cap: df_cap_filtrado = df_cap_filtrado[df_cap_filtrado['Prestador de Serviço'].isin(prest_sel_cap)]
-            if serv_sel_cap: df_cap_filtrado = df_cap_filtrado[df_cap_filtrado['Serviços'].isin(serv_sel_cap)]
+            if serv_sel_cap: 
+                # --- FILTRA A BASE SE A STRING AGRUPADA CONTIVER ALGUM DOS SERVIÇOS SELECIONADOS ---
+                mask = df_cap_filtrado['Serviços'].apply(
+                    lambda x: any(sel.lower() in str(x).lower() for sel in serv_sel_cap)
+                )
+                df_cap_filtrado = df_cap_filtrado[mask]
 
             if not df_cap_filtrado.empty:
                 # --- MÉTRICAS CONSOLIDADAS ---
