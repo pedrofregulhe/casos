@@ -119,6 +119,23 @@ def load_basecorp():
     except Exception as e:
         return {}
 
+# --- LEITURA DO RELATÓRIO DE CAPACIDADE (CSV) ---
+@st.cache_data(ttl=3600)
+def load_capacidade():
+    try:
+        # Tenta ler o CSV. O engine='python' com sep=None ajuda a descobrir automaticamente se é vírgula ou ponto-e-vírgula
+        df = pd.read_csv('Relatório de Controle da Capacidade.csv', sep=None, engine='python', encoding='utf-8-sig')
+        df.columns = df.columns.str.strip()
+        
+        if 'Prestador de Serviço' in df.columns:
+            df['Prestador de Serviço'] = df['Prestador de Serviço'].astype(str).str.strip()
+        if 'Data do Registro' in df.columns:
+            df['Data do Registro'] = df['Data do Registro'].astype(str).str.strip()
+            
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
 def extract_field(record, field_path):
     parts = field_path.split('.')
     val = record
@@ -141,7 +158,7 @@ def get_api_user_id(username, _pwd, _token):
         pass
     return None
 
-@st.cache_data(ttl=3600, show_spinner="Atualizando lista de proprietários...") 
+@st.cache_data(ttl=3600, show_spinner="A atualizar lista de proprietários...") 
 def get_owner_options(username, _pwd, _token):
     sf_conn = init_connection(username, _pwd, _token)
     users = sf_conn.query_all("SELECT Id, Name FROM User WHERE IsActive = TRUE")
@@ -175,7 +192,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # NOVA QUERY COM O ENDEREÇO DE ENTREGA DO ATIVO
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description, Origin, Type, 
@@ -196,10 +212,9 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
     """
     
     sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
-    my_bar = st.progress(0, text="Iniciando sincronização de Casos...")
+    my_bar = st.progress(0, text="A iniciar sincronização de Casos...")
     
     try:
-        # ETAPA 1: Puxa todos os casos
         result = sf_conn.query(query)
         total_records = result.get('totalSize', 0)
         records = result.get('records', [])
@@ -207,18 +222,17 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         if total_records > 0:
             current_len = len(records)
             percent = int((current_len / total_records) * 30)
-            my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
+            my_bar.progress(percent, text=f"A transferir casos... ({current_len} de {total_records})")
 
             while not result.get('done', True):
                 result = sf_conn.query_more(result['nextRecordsUrl'], True)
                 records.extend(result.get('records', []))
                 current_len = len(records)
                 percent = int((current_len / total_records) * 30)
-                my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
+                my_bar.progress(percent, text=f"A transferir casos... ({current_len} de {total_records})")
 
-        my_bar.progress(35, text="Buscando Itens de Ordem de Serviço na Base...")
+        my_bar.progress(35, text="A procurar Itens de Ordem de Serviço na Base...")
 
-        # ETAPA 2: Consulta Secundária em Lote (Buscando o "Neto" OS)
         os_dict = {}
         case_ids = [r['Id'] for r in records if str(r.get('Type') or '').upper() == 'OS']
         
@@ -244,7 +258,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 except Exception as e:
                     pass
 
-        my_bar.progress(50, text="Processando dados visuais e regras de negócio...")
+        my_bar.progress(50, text="A processar dados visuais e regras de negócio...")
 
         linhas = []
         hoje_utc = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -253,15 +267,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         for i, record in enumerate(records):
             if total_processar > 0 and i % 500 == 0:
                 progresso_atual = 50 + int((i / total_processar) * 50)
-                my_bar.progress(progresso_atual, text=f"Estruturando inteligência... {progresso_atual}%")
+                my_bar.progress(progresso_atual, text=f"A estruturar inteligência... {progresso_atual}%")
 
             tipo_caso = str(record.get('Type') or '').upper()
             tipo_aba = 'OS' if 'OS' in tipo_caso else 'OA'
             status_real_sf = str(record.get('Status') or '').strip().lower()
             
-            # --- FILTRO DE CANCELAMENTO EXCLUSIVO PARA OS ---
             if tipo_aba == 'OS' and status_real_sf in ['cancelado', 'cancelada', 'canceled', 'cancelled']:
-                continue # Pula esse caso e não coloca no painel
+                continue 
 
             dono_upper = str(record['Owner']['Name'] or '').upper() if record.get('Owner') else 'SISTEMA/SEM DONO'
             
@@ -287,7 +300,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None) if record.get('CreatedDate') else hoje_utc
             data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
             
-            # --- LÓGICA INTELIGENTE DE SLA ---
             sla_macro = "✅ No Prazo"
             sla_visual = "⚪ Sem SLA"
             sla_atrasado_bool = False
@@ -337,7 +349,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             fim_calc = data_fechamento if data_fechamento else hoje_utc
             idade_dias = (fim_calc - data_abertura).days
             
-            # --- EXTRAÇÃO DE CONTA E ATIVO ---
             acc = record.get('Account') or {}
             acc_name = str(acc.get('Name') or '-')
             acc_cnpj = str(acc.get('FOZ_CNPJ__c') or '-')
@@ -349,7 +360,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             asset_end = str(asset.get('FOZ_EndFranquiaForm__c') or '-')
             asset_install = str(asset.get('InstallDate') or '-')
             
-            # EXTRAINDO A FRANQUIA OFICIAL DO ENDEREÇO DE ENTREGA
             asset_endereco_entrega = asset.get('FOZ_EnderecoEntrega__r') or {}
             os_franquia_principal = str(asset_endereco_entrega.get('FOZ_FranquiaAtendimento__c') or '').strip()
             if not os_franquia_principal:
@@ -360,13 +370,11 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             if raw_item_contrato and not item_contrato_limpo: item_contrato_limpo = "0"
             carteira_basecorp = str(basecorp_dict.get(item_contrato_limpo, "-") or "-")
                 
-            # --- MESCLANDO A ORDEM DE SERVIÇO ---
             case_id = record['Id']
             os_info = os_dict.get(case_id, {})
             
             os_numero = str(os_info.get('FOZ_Numero_OS__c') or '')
             
-            # O ANTIGO CAMPO DE FRANQUIA AGORA É A BASE/ROTA DA OS
             os_base_roteirizacao = str(os_info.get('FOZ_Nome_Franquia__c') or '').strip()
             if not os_base_roteirizacao: 
                 os_base_roteirizacao = "⏳ AGUARDANDO ROTEIRIZAÇÃO"
@@ -375,7 +383,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             os_agendamento = str(os_info.get('FOZ_Agendado_para_data_periodo__c') or '')
             os_tecnico = str(os_info.get('FOZ_Id_Tecnico__c') or '')
                 
-            # --- COMENTÁRIOS E DESCRIÇÃO ---
             desc_oficial = str(record.get('Description') or '')
             historico_comentarios = ""
             if record.get('CaseComments') and record['CaseComments'].get('records'):
@@ -517,13 +524,13 @@ def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
 
 @st.dialog("🔄 Transferir e Comentar")
 def modal_transferir_comentar(casos_selecionados_df, lista_prop):
-    st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
+    st.markdown(f"Você está a transferir **{len(casos_selecionados_df)} caso(s)**.")
     tem_basecorp = not casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-'].empty
     modo_transferencia = "Manual"
     dono_selecionado = None
     
     if tem_basecorp:
-        st.info("🎯 Identificamos caso(s) com mapeamento na BaseCorp.")
+        st.info("🎯 Identificámos caso(s) com mapeamento na BaseCorp.")
         modo_transferencia = st.radio("Como deseja realizar a transferência?", ["Manual (Escolher nova fila/usuário)", "Inteligente (Usar roteamento BaseCorp)"])
         
     if modo_transferencia.startswith("Manual"):
@@ -543,7 +550,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop):
             st.warning("⚠️ Selecione um proprietário para transferir.")
             return
             
-        with st.spinner("Processando..."):
+        with st.spinner("A processar..."):
             sucessos, erros, comentarios_payload = 0, [], []
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
@@ -585,7 +592,7 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop):
 
 @st.dialog("📝 Editar Casos")
 def modal_editar_casos(casos_selecionados_df, df_view):
-    st.markdown(f"Editando **{len(casos_selecionados_df)} caso(s)**.")
+    st.markdown(f"A editar **{len(casos_selecionados_df)} caso(s)**.")
     opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
     if "Fechado" not in opcoes_status: opcoes_status.append("Fechado")
         
@@ -604,7 +611,7 @@ def modal_editar_casos(casos_selecionados_df, df_view):
             st.warning("Nenhuma alteração selecionada.")
             return
             
-        with st.spinner("Editando..."):
+        with st.spinner("A editar..."):
             sucessos, erros, comentarios_payload = 0, [], []
             for _, row in casos_selecionados_df.iterrows():
                 id_caso, num_caso = row['ID do Caso'], row['Número']
@@ -635,7 +642,7 @@ def modal_editar_casos(casos_selecionados_df, df_view):
 
 @st.dialog("🔔 Criar Tarefa de Follow-up")
 def modal_followup(casos_selecionados_df, lista_prop):
-    st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
+    st.markdown(f"A criar follow-up para **{len(casos_selecionados_df)} caso(s)**.")
     users_followup = st.multiselect("Notificar / Atribuir Tarefa para (Selecione vários se desejar):", list(lista_prop.keys()))
     descricao_followup = st.text_area("Descrição da Tarefa:", height=100)
     
@@ -651,7 +658,7 @@ def modal_followup(casos_selecionados_df, lista_prop):
             st.warning("⚠️ Preencha os campos.")
             return
             
-        with st.spinner("Registrando tarefas..."):
+        with st.spinner("A registar tarefas..."):
             try:
                 payload, comentarios_payload = [], []
                 for user_nome in users_followup:
@@ -761,9 +768,13 @@ st.session_state.last_dt_fim = dt_fim
 filtro_meus_casos = st.sidebar.toggle("🙋‍♂️ Ver apenas Meus Casos", value=False)
 incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 
+# Carregamento de dados
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, SF_USER, SF_PWD, SF_TOKEN)
 lista_proprietarios = get_owner_options(SF_USER, SF_PWD, SF_TOKEN)
 api_user_id = get_api_user_id(SF_USER, SF_PWD, SF_TOKEN)
+
+# ADICIONADO AQUI A LEITURA DO ARQUIVO DE CAPACIDADE
+df_capacidade = load_capacidade()
 
 if filtro_meus_casos and not df_filtrado.empty and api_user_id:
     df_filtrado = df_filtrado[df_filtrado['ID do Proprietário'] == api_user_id]
@@ -941,7 +952,7 @@ elif st.session_state.fila_selecionada is not None:
         return output.getvalue()
 
     st.download_button(
-        label=f"📥 Baixar Extrato OA ({len(df_render)} registros)",
+        label=f"📥 Baixar Extrato OA ({len(df_render)} registos)",
         data=to_excel_oa(df_render), file_name=f'extrato_oa_{fila_atual.replace(" ", "_").lower()}.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
@@ -977,7 +988,7 @@ elif st.session_state.franquia_selecionada is not None:
         agendamento_sel = st.multiselect("📅 Filtrar Agendamento:", agendamentos_disp, placeholder="Todos os agendamentos...")
         if agendamento_sel:
             df_view_os = df_view_os[df_view_os['OS - Agendamento'].isin(agendamento_sel)]
-        
+            
     st.markdown("### 📊 Quebra Operacional da Franquia")
     # Agrupamento 3D: Base > Tipo de Serviço > Status
     df_breakdown = df_view_os.groupby(['OS - Base (Rota)', 'OS - Tipo Serviço', 'Status']).size().reset_index(name='Quantidade')
@@ -987,7 +998,79 @@ elif st.session_state.franquia_selecionada is not None:
         st.dataframe(df_pivot, use_container_width=True)
     else:
         st.info("Nenhuma OS para o filtro selecionado.")
+        
+    # --- NOVA SEÇÃO: CRUZAMENTO COM CAPACIDADE (CSV) ---
+    st.markdown("---")
+    st.markdown("### 🗓️ Painel de Capacidade de Agendamentos")
     
+    if not df_capacidade.empty:
+        # Filtra o CSV para mostrar apenas a Base (Prestador de Serviço) selecionada
+        bases_para_filtrar = [base_sel] if base_sel != "Todas" else [str(x) for x in df_view_os['OS - Base (Rota)'].unique() if str(x).strip() != '']
+        
+        # Realiza o match entre SF e CSV
+        df_cap_filtrado = df_capacidade[df_capacidade['Prestador de Serviço'].isin(bases_para_filtrar)].copy()
+        
+        if not df_cap_filtrado.empty:
+            # Se o utilizador filtrou um agendamento (Data) no Salesforce, tenta filtrar o CSV também
+            if agendamento_sel:
+                # Pega apenas as datas puras para o match flexível (caso o SF tenha formato diferente)
+                datas_sf = [str(d).split()[0] for d in agendamento_sel]
+                mask_data = df_cap_filtrado['Data do Registro'].astype(str).apply(lambda x: any(d in x for d in datas_sf))
+                df_cap_filtrado = df_cap_filtrado[mask_data]
+
+            if not df_cap_filtrado.empty:
+                # --- MÉTRICAS CONSOLIDADAS ---
+                for col in ['Capacidade', 'Ocupada', 'Disponível']:
+                    if col in df_cap_filtrado.columns:
+                        df_cap_filtrado[col] = pd.to_numeric(df_cap_filtrado[col], errors='coerce').fillna(0)
+                        
+                total_cap = int(df_cap_filtrado['Capacidade'].sum()) if 'Capacidade' in df_cap_filtrado.columns else 0
+                total_ocup = int(df_cap_filtrado['Ocupada'].sum()) if 'Ocupada' in df_cap_filtrado.columns else 0
+                total_disp = int(df_cap_filtrado['Disponível'].sum()) if 'Disponível' in df_cap_filtrado.columns else 0
+                
+                st.markdown(f"""
+                <div style="display: flex; gap: 15px; margin-bottom: 25px;">
+                    <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0056b3; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                        <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Capacidade Total</div>
+                        <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{total_cap}</div>
+                    </div>
+                    <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #d9534f; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                        <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Capacidade Ocupada</div>
+                        <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{total_ocup}</div>
+                    </div>
+                    <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #00CC96; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                        <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Capacidade Disponível</div>
+                        <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{total_disp}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # --- TABELA DE CAPACIDADE COLORIDA ---
+                def colorir_capacidade(row):
+                    uso_str = str(row.get('% Uso', '0%')).replace('%', '').replace(',', '.').strip()
+                    try:
+                        uso_val = float(uso_str)
+                        if uso_val >= 100:
+                            return ['background-color: #ffebee; color: #d9534f; font-weight: bold'] * len(row) # Vermelho
+                        elif uso_val >= 80:
+                            return ['background-color: #fff8e1; color: #f0ad4e'] * len(row) # Amarelo
+                        else:
+                            return ['background-color: #e8f5e9; color: #28a745'] * len(row) # Verde
+                    except:
+                        return [''] * len(row)
+
+                st.dataframe(
+                    df_cap_filtrado.style.apply(colorir_capacidade, axis=1),
+                    use_container_width=True, 
+                    hide_index=True
+                )
+            else:
+                st.info("ℹ️ Não há informações de capacidade no CSV para as datas específicas selecionadas no filtro.")
+        else:
+            st.warning("⚠️ Nenhuma correspondência de Capacidade encontrada no CSV para a Base/Rota selecionada. Verifique se o nome no Salesforce bate com a coluna 'Prestador de Serviço'.")
+    else:
+        st.warning("⚠️ O arquivo 'Relatório de Controle da Capacidade.csv' não foi encontrado ou está vazio. Coloque o ficheiro na mesma pasta da aplicação.")
+
     st.markdown("---")
     st.markdown("### 📋 Tabela Detalhada de OS (Somente Leitura)")
     
@@ -1026,7 +1109,7 @@ elif st.session_state.franquia_selecionada is not None:
         return output.getvalue()
 
     st.download_button(
-        label=f"📥 Baixar Extrato OS ({len(df_render)} registros)",
+        label=f"📥 Baixar Extrato OS ({len(df_render)} registos)",
         data=to_excel_os(df_render), file_name=f'extrato_os_{fra_atual.replace(" ", "_").lower()}.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
