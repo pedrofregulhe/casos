@@ -55,7 +55,8 @@ st.markdown("""
         background-color: #0056b3 !important; color: white !important; border: none !important;
     }
     .btn-login>button:hover { background-color: #004494 !important; }
-    .stRadio > div { background-color: #f8f9fa; padding: 10px; border-radius: 8px; border: 1px solid #dce1e6; }
+    .stTabs [data-baseweb="tab-list"] { gap: 20px; }
+    .stTabs [data-baseweb="tab"] { padding-top: 10px; padding-bottom: 10px; font-size: 18px; font-weight: 600; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -69,8 +70,6 @@ if 'fila_selecionada' not in st.session_state:
     st.session_state.fila_selecionada = None
 if 'franquia_selecionada' not in st.session_state:
     st.session_state.franquia_selecionada = None
-if 'modulo_ativo' not in st.session_state:
-    st.session_state.modulo_ativo = "OA"
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
 
@@ -176,7 +175,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # Consulta primária (Casos, Contas, Ativos)
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description, Origin, Type, 
@@ -218,9 +216,9 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
         my_bar.progress(35, text="Buscando Itens de Ordem de Serviço na Base...")
 
-        # ETAPA 2: Consulta Secundária em Lote (Buscando o "Neto")
+        # ETAPA 2: Consulta Secundária em Lote (Buscando o "Neto" OS)
         os_dict = {}
-        case_ids = [r['Id'] for r in records if str(r.get('Type')).upper() == 'OS']
+        case_ids = [r['Id'] for r in records if str(r.get('Type') or '').upper() == 'OS']
         
         if case_ids:
             chunk_size = 200
@@ -242,7 +240,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                         if c_id and c_id not in os_dict:
                             os_dict[c_id] = os_rec
                 except Exception as e:
-                    pass # Se falhar, segue o fluxo vazio
+                    pass
 
         my_bar.progress(50, text="Processando dados visuais e regras de negócio...")
 
@@ -255,7 +253,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 progresso_atual = 50 + int((i / total_processar) * 50)
                 my_bar.progress(progresso_atual, text=f"Estruturando inteligência... {progresso_atual}%")
 
-            dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
+            dono_upper = str(record['Owner']['Name'] or '').upper() if record.get('Owner') else 'SISTEMA/SEM DONO'
             
             filas_conhecidas = ["ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"]
             
@@ -275,8 +273,8 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 fila_principal = "ATRIBUÍDO AO USUÁRIO"
                 subfila = dono_upper
                 
-            macro_status = "🟢 Fechado" if record['Status'] in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
-            data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
+            macro_status = "🟢 Fechado" if record.get('Status') in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
+            data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None) if record.get('CreatedDate') else hoje_utc
             data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
             
             # --- LÓGICA INTELIGENTE DE SLA ---
@@ -284,7 +282,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             sla_visual = "⚪ Sem SLA"
             sla_atrasado_bool = False
             
-            status_real_sf = record['Status'].strip().lower() if record['Status'] else ""
+            status_real_sf = str(record.get('Status') or '').strip().lower()
             
             if fila_principal in ["CASOS SEM FILA - GENÉRICO", "CORPORATIVO"] and status_real_sf in ["aberto", "em aberto"]:
                 target_dt_custom = data_abertura + timedelta(hours=24)
@@ -307,7 +305,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                     else:
                         sla_visual = f"🟢 No Prazo ({int(diferenca_horas)} h)"
             else:
-                if record['CaseMilestones'] and record['CaseMilestones'].get('records'):
+                if record.get('CaseMilestones') and record['CaseMilestones'].get('records'):
                     milestones = record['CaseMilestones']['records']
                     sla_atrasado_bool = any(m.get('IsViolated') for m in milestones)
                     sla_macro = "🔴 Atrasado" if sla_atrasado_bool else "✅ No Prazo"
@@ -331,47 +329,50 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             fim_calc = data_fechamento if data_fechamento else hoje_utc
             idade_dias = (fim_calc - data_abertura).days
             
-            # --- EXTRAÇÃO DE CONTA E ATIVO ---
+            # --- BLINDAGEM CONTRA NULOS NAS EXTRAÇÕES ---
             acc = record.get('Account') or {}
-            acc_name = acc.get('Name', '-')
-            acc_cnpj = acc.get('FOZ_CNPJ__c', '-')
-            acc_classificacao = acc.get('FOZ_Classificacao__c', '-')
-            acc_posfin = acc.get('FOZ_StatusPosicaoFinanceira__c', '-')
+            acc_name = str(acc.get('Name') or '-')
+            acc_cnpj = str(acc.get('FOZ_CNPJ__c') or '-')
+            acc_classificacao = str(acc.get('FOZ_Classificacao__c') or '-')
+            acc_posfin = str(acc.get('FOZ_StatusPosicaoFinanceira__c') or '-')
             
             asset = record.get('FOZ_Asset__r') or {}
-            asset_status = asset.get('Status', '-')
-            asset_end = asset.get('FOZ_EndFranquiaForm__c', '-')
-            asset_install = asset.get('InstallDate', '-')
+            asset_status = str(asset.get('Status') or '-')
+            asset_end = str(asset.get('FOZ_EndFranquiaForm__c') or '-')
+            asset_install = str(asset.get('InstallDate') or '-')
             
-            raw_item_contrato = extract_field(record, CAMPO_ITEM_CONTRATO).strip()
+            raw_item_contrato = str(extract_field(record, CAMPO_ITEM_CONTRATO) or '').strip()
             item_contrato_limpo = raw_item_contrato.lstrip('0') if raw_item_contrato else ""
             if raw_item_contrato and not item_contrato_limpo: item_contrato_limpo = "0"
-            carteira_basecorp = basecorp_dict.get(item_contrato_limpo, "-") if item_contrato_limpo else "-"
+            carteira_basecorp = str(basecorp_dict.get(item_contrato_limpo, "-") or "-")
                 
             # --- MESCLANDO A ORDEM DE SERVIÇO ---
             case_id = record['Id']
             os_info = os_dict.get(case_id, {})
-            os_numero = os_info.get('FOZ_Numero_OS__c', '')
             
-            os_franquia = os_info.get('FOZ_Nome_Franquia__c', '')
-            if not os_franquia.strip(): os_franquia = "FRANQUIA NÃO INFORMADA"
+            os_numero = str(os_info.get('FOZ_Numero_OS__c') or '')
+            os_franquia = str(os_info.get('FOZ_Nome_Franquia__c') or '').strip()
+            if not os_franquia: 
+                os_franquia = "FRANQUIA NÃO INFORMADA"
                 
-            os_tipo_servico = os_info.get('FOZ_Tipo_de_Servico__c', 'Sem Tipo')
-            os_agendamento = os_info.get('FOZ_Agendado_para_data_periodo__c', '')
-            os_tecnico = os_info.get('FOZ_Id_Tecnico__c', '')
+            os_tipo_servico = str(os_info.get('FOZ_Tipo_de_Servico__c') or 'Sem Tipo')
+            os_agendamento = str(os_info.get('FOZ_Agendado_para_data_periodo__c') or '')
+            os_tecnico = str(os_info.get('FOZ_Id_Tecnico__c') or '')
                 
             # --- COMENTÁRIOS E DESCRIÇÃO ---
-            desc_oficial = record.get('Description')
+            desc_oficial = str(record.get('Description') or '')
             historico_comentarios = ""
             if record.get('CaseComments') and record['CaseComments'].get('records'):
                 for comment in record['CaseComments']['records']:
-                    autor = comment['CreatedBy']['Name'] if comment.get('CreatedBy') else 'Usuário'
+                    autor = str(comment.get('CreatedBy', {}).get('Name') or 'Usuário')
                     try:
                         dt_obj = pd.to_datetime(comment['CreatedDate']).tz_convert(fuso_br)
                         data_str = dt_obj.strftime('%d/%m/%Y %H:%M')
                     except:
-                        data_str = comment['CreatedDate']
-                    historico_comentarios += f"🗣️ {autor} em {data_str}:\n{comment['CommentBody']}\n\n"
+                        data_str = str(comment.get('CreatedDate') or '')
+                    
+                    corpo_coment = str(comment.get('CommentBody') or '')
+                    historico_comentarios += f"🗣️ {autor} em {data_str}:\n{corpo_coment}\n\n"
             
             if desc_oficial and historico_comentarios:
                 descricao_final = f"📝 DESCRIÇÃO ORIGINAL:\n{desc_oficial}\n\n{'-'*40}\n\n💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
@@ -380,24 +381,24 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             else:
                 descricao_final = desc_oficial if desc_oficial else "-"
                 
-            tipo_caso = str(record.get('Type')).upper()
+            tipo_caso = str(record.get('Type') or '').upper()
             tipo_aba = 'OS' if 'OS' in tipo_caso else 'OA'
                 
             linhas.append({
-                'ID do Caso': record['Id'],
-                'ID do Proprietário': record['OwnerId'],
-                'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
-                'Número': record['CaseNumber'],
+                'ID do Caso': record.get('Id'),
+                'ID do Proprietário': record.get('OwnerId'),
+                'Link Salesforce': f"{sf_base_url}{record.get('Id')}/view",
+                'Número': record.get('CaseNumber'),
                 'Tipo Aba': tipo_aba,
                 'Abertura': data_abertura,
                 'Fechamento': data_fechamento,
-                'Origem': record['Origin'],
-                'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
-                'Motivo': record['FOZ_Motivo__c'],
-                'Detalhe': record['FOZ_Detalhe__c'],
-                'Substatus': record['FOZ_SubStatus__c'] if record['FOZ_SubStatus__c'] else "",
+                'Origem': str(record.get('Origin') or ''),
+                'Tipo Solicitação': str(record.get('FOZ_TipoSolicitacao__c') or ''),
+                'Motivo': str(record.get('FOZ_Motivo__c') or ''),
+                'Detalhe': str(record.get('FOZ_Detalhe__c') or ''),
+                'Substatus': str(record.get('FOZ_SubStatus__c') or ''),
                 'SLA (Prazo)': sla_visual,
-                'Status': record['Status'],
+                'Status': str(record.get('Status') or ''),
                 'BaseCorp Carteira': carteira_basecorp,
                 'Conta': acc_name,
                 'Conta - CNPJ': acc_cnpj,
@@ -435,6 +436,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         st.error(f"Erro de comunicação com o Salesforce: {e}")
         return pd.DataFrame()
 
+
 # --- FUNÇÕES DE MODAIS E AUDITORIA AUTOMÁTICA ---
 def criar_comentario_auditoria(num_caso, id_caso, extra_texto=""):
     texto_base = "Caso editado ou movimentado via Automação."
@@ -464,6 +466,38 @@ def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
     resumo += f"▪️ Casos Fechados: {fech_total}\n"
     resumo += f"▪️ SLA Atrasado (Em Aberto): {atr_total}\n\n"
     
+    resumo += f"🎯 *DESTAQUES OPERACIONAIS*\n"
+    for fila_destaque in ["ATRIBUÍDO AO USUÁRIO", "CORPORATIVO"]:
+        df_destaque = df_dados[df_dados['Fila Principal'] == fila_destaque]
+        if not df_destaque.empty:
+            vol_d = len(df_destaque)
+            abertos_d = len(df_destaque[df_destaque['Macro Status'] == '🟡 Em Tratativa'])
+            atr_d = len(df_destaque[(df_destaque['SLA Macro'] == '🔴 Atrasado') & (df_destaque['Macro Status'] == '🟡 Em Tratativa')])
+            resumo += f"🔸 *{fila_destaque}:* {vol_d} Casos no total | {abertos_d} Abertos | {atr_d} Atrasados\n"
+            subfilas = sorted(df_destaque['Subfila'].dropna().unique().tolist())
+            for sub in subfilas:
+                if sub == "-": continue
+                df_sub = df_destaque[df_destaque['Subfila'] == sub]
+                resumo += f"   ↳ {sub}: {len(df_sub)} Total | {len(df_sub[df_sub['Macro Status'] == '🟡 Em Tratativa'])} Abertos | {len(df_sub[(df_sub['SLA Macro'] == '🔴 Atrasado') & (df_sub['Macro Status'] == '🟡 Em Tratativa')])} Atrasados\n"
+            resumo += "\n"
+            
+    resumo += f"🏢 *DETALHAMENTO POR FILA GERAL*\n"
+    filas = sorted(df_dados['Fila Principal'].dropna().unique().tolist())
+    for fila in filas:
+        if fila in ["ATRIBUÍDO AO USUÁRIO", "CORPORATIVO"]: continue 
+        df_fila = df_dados[df_dados['Fila Principal'] == fila]
+        vol = len(df_fila)
+        trat = len(df_fila[df_fila['Macro Status'] == '🟡 Em Tratativa'])
+        fech = len(df_fila[df_fila['Macro Status'] == '🟢 Fechado'])
+        atr = len(df_fila[(df_fila['SLA Macro'] == '🔴 Atrasado') & (df_fila['Macro Status'] == '🟡 Em Tratativa')])
+        
+        df_fech = df_fila[df_fila['Macro Status'] == '🟢 Fechado']
+        tma_str = f"{(df_fech['Fechamento'] - df_fech['Abertura']).dt.total_seconds().mean() / (24 * 3600):.1f} dias" if not df_fech.empty else "N/A"
+            
+        resumo += f"\n🔹 *{fila}*\n"
+        resumo += f"   Total: {vol} | Abertos: {trat} | Fechados: {fech}\n"
+        resumo += f"   SLA Atrasado: {atr} | TMA Médio: {tma_str}\n"
+
     st.markdown("💡 **Clique no ícone de 'Copiar'** no canto superior direito para copiar.")
     st.code(resumo, language="markdown")
 
@@ -622,9 +656,8 @@ def modal_followup(casos_selecionados_df, lista_prop):
             except Exception as e:
                 st.error(f"Erro: {e}")
 
-
-# --- RENDERIZAÇÃO DE CARDS (FILAS OA E FRANQUIAS OS) ---
-def desenhar_card_generico(titulo, df_subset, chave_btn):
+# --- RENDERIZAÇÃO DE CARDS DINÂMICOS ---
+def desenhar_card(titulo, df_subset, tipo):
     vol = len(df_subset)
     trat = len(df_subset[df_subset['Macro Status'] == '🟡 Em Tratativa'])
     fech = len(df_subset[df_subset['Macro Status'] == '🟢 Fechado'])
@@ -644,8 +677,8 @@ def desenhar_card_generico(titulo, df_subset, chave_btn):
     </div>
     """
     st.markdown(html_card, unsafe_allow_html=True)
-    if st.button("Abrir Detalhe", key=chave_btn, use_container_width=True):
-        if st.session_state.modulo_ativo == "OA":
+    if st.button("Abrir Detalhe", key=f"btn_{tipo}_{titulo}", use_container_width=True):
+        if tipo == "OA":
             st.session_state.fila_selecionada = titulo
         else:
             st.session_state.franquia_selecionada = titulo
@@ -666,20 +699,6 @@ if HAS_AUTOREFRESH:
         st_autorefresh(interval=5 * 60 * 1000, key="data_refresh")
 
 st.sidebar.markdown("---")
-
-# SELETOR GIGANTE DE MÓDULO NA BARRA LATERAL
-modulo_escolhido = st.sidebar.radio("🎯 Selecione o Módulo:", ["📁 Visão OA (Atendimentos)", "🔧 Visão OS (Ordens de Serviço)"])
-if modulo_escolhido.startswith("📁"):
-    if st.session_state.modulo_ativo != "OA":
-        st.session_state.modulo_ativo = "OA"
-        st.session_state.fila_selecionada = None
-        st.rerun()
-else:
-    if st.session_state.modulo_ativo != "OS":
-        st.session_state.modulo_ativo = "OS"
-        st.session_state.franquia_selecionada = None
-        st.rerun()
-
 
 if st.sidebar.button("📄 Gerar Resumo Diário", type="primary", use_container_width=True):
     per_sel = st.session_state.get('last_periodo', "Últimos 30 Dias")
@@ -744,247 +763,248 @@ if busca_global and not df_filtrado.empty:
 
 st.session_state.last_df = df_filtrado.copy() if not df_filtrado.empty else pd.DataFrame()
 
+
 # =========================================================================
-# LÓGICA DE RENDERIZAÇÃO DO MÓDULO OA (FILAS)
+# RENDERIZAÇÃO DA TELA PRINCIPAL (ABAS OU DETALHE)
 # =========================================================================
-if st.session_state.modulo_ativo == "OA":
-    df_oa = df_filtrado[df_filtrado['Tipo Aba'] == 'OA'].copy() if not df_filtrado.empty else pd.DataFrame()
+if df_filtrado.empty:
+    st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
+    st.info("Nenhum caso encontrado para os filtros selecionados.")
     
-    if df_oa.empty:
-        st.markdown("<h1>📁 Visão OA (Ordem de Atendimento)</h1>", unsafe_allow_html=True)
-        st.info("Nenhuma OA encontrada para os filtros selecionados.")
-    elif st.session_state.fila_selecionada is None:
-        st.markdown("<h1>📁 Gestão de Filas OA</h1>", unsafe_allow_html=True)
-        
-        todas_filas = df_oa['Fila Principal'].unique().tolist()
-        if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
-            todas_filas.remove("ATRIBUÍDO AO USUÁRIO")
-            filas_ordenadas = sorted(todas_filas)
-            filas_ordenadas.append("ATRIBUÍDO AO USUÁRIO")
+elif st.session_state.fila_selecionada is None and st.session_state.franquia_selecionada is None:
+    st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
+    
+    # CRIAÇÃO DAS DUAS GRANDES ABAS (TABS)
+    tab_oa, tab_os = st.tabs(["📁 Visão OA (Atendimentos)", "🔧 Visão OS (Ordens de Serviço)"])
+    
+    # CONTEÚDO DA ABA OA
+    with tab_oa:
+        df_oa = df_filtrado[df_filtrado['Tipo Aba'] == 'OA'].copy()
+        if df_oa.empty:
+            st.info("Nenhuma Ordem de Atendimento (OA) encontrada para o período selecionado.")
         else:
-            filas_ordenadas = sorted(todas_filas)
-            
-        cols = st.columns(4)
-        for i, fila in enumerate(filas_ordenadas):
-            df_fila = df_oa[df_oa['Fila Principal'] == fila]
-            with cols[i % 4]:
-                desenhar_card_generico(fila, df_fila, f"btn_oa_{i}")
-                st.markdown("<br>", unsafe_allow_html=True)
-    else:
-        fila_atual = st.session_state.fila_selecionada
-        st.markdown('<div class="btn-voltar-container">', unsafe_allow_html=True)
-        if st.button("⬅️ Voltar para Filas OA"):
-            st.session_state.fila_selecionada = None
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Fila: {fila_atual}</h2>", unsafe_allow_html=True)
-        
-        df_view = df_oa[df_oa['Fila Principal'] == fila_atual].copy()
-        
-        col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
-        with col_f1:
-            if fila_atual in ["CORPORATIVO", "ATRIBUÍDO AO USUÁRIO", "SAFETY", "CASOS SEM FILA - GENÉRICO"]:
-                label_filtro = "📌 Filtrar Carteira:" if fila_atual == "CORPORATIVO" else "👤 Filtrar Subfila:"
-                subfilas_disp = sorted(df_view['Subfila'].dropna().unique().tolist())
-                subfila_sel = st.selectbox(label_filtro, ["Todos"] + subfilas_disp)
-                if subfila_sel != "Todos": df_view = df_view[df_view['Subfila'] == subfila_sel]
-        with col_f2:
-            status_disp = sorted(df_view['Status'].dropna().unique().tolist())
-            status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
-            if status_sel != "Todos": df_view = df_view[df_view['Status'] == status_sel]
+            todas_filas = df_oa['Fila Principal'].unique().tolist()
+            if "ATRIBUÍDO AO USUÁRIO" in todas_filas:
+                todas_filas.remove("ATRIBUÍDO AO USUÁRIO")
+                filas_ordenadas = sorted(todas_filas)
+                filas_ordenadas.append("ATRIBUÍDO AO USUÁRIO")
+            else:
+                filas_ordenadas = sorted(todas_filas)
                 
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        vol = len(df_view)
-        trat = len(df_view[df_view['Macro Status'] == '🟡 Em Tratativa'])
-        fech = len(df_view[df_view['Macro Status'] == '🟢 Fechado'])
-        atr = len(df_view[(df_view['SLA Macro'] == '🔴 Atrasado') & (df_view['Macro Status'] == '🟡 Em Tratativa')])
-        df_fechados = df_view[df_view['Macro Status'] == '🟢 Fechado']
-        tma_str = f"{(df_fechados['Fechamento'] - df_fechados['Abertura']).dt.total_seconds().mean() / (24 * 3600):.1f} dias" if not df_fechados.empty else "N/A"
+            cols = st.columns(4)
+            for i, fila in enumerate(filas_ordenadas):
+                df_fila = df_oa[df_oa['Fila Principal'] == fila]
+                with cols[i % 4]:
+                    desenhar_card(fila, df_fila, "OA")
+                    st.markdown("<br>", unsafe_allow_html=True)
 
-        st.markdown(f"""
-        <div style="display: flex; gap: 15px; margin-bottom: 25px;">
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0056b3; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Total OA</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{vol}</div>
-            </div>
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #f0ad4e; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Em Tratativa</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{trat}</div>
-            </div>
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #00CC96; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Fechados</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{fech}</div>
-            </div>
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #d9534f; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Atrasados</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{atr}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        colunas_ordem_ideal = [
-            'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 
-            'Motivo', 'Detalhe', 'Substatus', 'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 
-            'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
-        ]
-        df_render = df_view[colunas_ordem_ideal].copy()
-        df_render.insert(0, 'Selecionar', False)
-        
-        def colorir_linha(row): return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
-        colunas_bloqueadas = df_render.columns.drop(['Selecionar']).tolist()
-
-        edited_df = st.data_editor(
-            df_render.style.apply(colorir_linha, axis=1),
-            column_config={
-                "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
-                "ID do Caso": None, "ID do Proprietário": None, 
-                "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
-                "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
-                "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
-                "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
-                "Descrição": st.column_config.TextColumn("Descrição", width="large")
-            },
-            disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_oa"
-        )
-
-        casos_selecionados = edited_df[edited_df['Selecionar'] == True]
-        if not casos_selecionados.empty:
-            st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
-            c_btn1, c_btn2, c_btn3 = st.columns(3)
-            with c_btn1:
-                if st.button("🔄 Transferir Casos", use_container_width=True): modal_transferir_comentar(casos_selecionados, lista_proprietarios)
-            with c_btn2:
-                if st.button("📝 Editar Casos", use_container_width=True): modal_editar_casos(casos_selecionados, df_view)
-            with c_btn3:
-                if st.button("🔔 Criar Follow-up", use_container_width=True): modal_followup(casos_selecionados, lista_proprietarios)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        def to_excel_oa(df_export):
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
-                df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
-                if df_temp['Fechamento'].notna().any(): df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
-                df_temp.to_excel(writer, index=False, sheet_name='Extrato_OA')
-            return output.getvalue()
-
-        st.download_button(
-            label=f"📥 Baixar Extrato OA ({len(df_render)} registros)",
-            data=to_excel_oa(df_render), file_name=f'extrato_oa_{fila_atual.replace(" ", "_").lower()}.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-
-# =========================================================================
-# LÓGICA DE RENDERIZAÇÃO DO MÓDULO OS (FRANQUIAS E DETALHES DE OS)
-# =========================================================================
-elif st.session_state.modulo_ativo == "OS":
-    df_os = df_filtrado[df_filtrado['Tipo Aba'] == 'OS'].copy() if not df_filtrado.empty else pd.DataFrame()
-    
-    if df_os.empty:
-        st.markdown("<h1>🔧 Visão OS (Ordem de Serviço)</h1>", unsafe_allow_html=True)
-        st.info("Nenhuma OS encontrada para os filtros selecionados.")
-    elif st.session_state.franquia_selecionada is None:
-        st.markdown("<h1>🔧 Gestão de OS por Franquia</h1>", unsafe_allow_html=True)
-        
-        franquias = sorted(df_os['OS - Franquia'].unique().tolist())
-        cols = st.columns(4)
-        for i, fra in enumerate(franquias):
-            df_fra = df_os[df_os['OS - Franquia'] == fra]
-            with cols[i % 4]:
-                desenhar_card_generico(fra, df_fra, f"btn_os_{i}")
-                st.markdown("<br>", unsafe_allow_html=True)
-    else:
-        fra_atual = st.session_state.franquia_selecionada
-        st.markdown('<div class="btn-voltar-container">', unsafe_allow_html=True)
-        if st.button("⬅️ Voltar para Franquias"):
-            st.session_state.franquia_selecionada = None
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Franquia: {fra_atual}</h2>", unsafe_allow_html=True)
-        
-        df_view_os = df_os[df_os['OS - Franquia'] == fra_atual].copy()
-        
-        # Filtros internos para a OS
-        col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
-        with col_f1:
-            tipos_disp = sorted(df_view_os['OS - Tipo Serviço'].dropna().unique().tolist())
-            tipo_sel = st.selectbox("🛠️ Filtrar Tipo de Serviço:", ["Todos"] + tipos_disp)
-            if tipo_sel != "Todos": df_view_os = df_view_os[df_view_os['OS - Tipo Serviço'] == tipo_sel]
-        with col_f2:
-            status_disp = sorted(df_view_os['Status'].dropna().unique().tolist())
-            status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
-            if status_sel != "Todos": df_view_os = df_view_os[df_view_os['Status'] == status_sel]
-            
-        # Tabela de Quebra Operacional (Agrupamento Dinâmico)
-        st.markdown("### 📊 Quebra Operacional da Franquia")
-        df_breakdown = df_view_os.groupby(['OS - Tipo Serviço', 'Status']).size().reset_index(name='Quantidade')
-        
-        # Cria uma visualização mais elegante pivotada, se houver dados
-        if not df_breakdown.empty:
-            df_pivot = df_breakdown.pivot(index='OS - Tipo Serviço', columns='Status', values='Quantidade').fillna(0).astype(int)
-            df_pivot['Total Geral'] = df_pivot.sum(axis=1)
-            # Mostra a tabela centralizada com cor bonitinha
-            st.dataframe(df_pivot.style.background_gradient(cmap='Blues'), use_container_width=True)
+    # CONTEÚDO DA ABA OS
+    with tab_os:
+        df_os = df_filtrado[df_filtrado['Tipo Aba'] == 'OS'].copy()
+        if df_os.empty:
+            st.info("Nenhuma Ordem de Serviço (OS) encontrada para o período selecionado.")
         else:
-            st.info("Nenhuma OS para o filtro selecionado.")
+            franquias = sorted(df_os['OS - Franquia'].unique().tolist())
+            cols = st.columns(4)
+            for i, fra in enumerate(franquias):
+                df_fra = df_os[df_os['OS - Franquia'] == fra]
+                with cols[i % 4]:
+                    desenhar_card(fra, df_fra, "OS")
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+# DETALHE DA FILA OA
+elif st.session_state.fila_selecionada is not None:
+    fila_atual = st.session_state.fila_selecionada
+    st.markdown('<div class="btn-voltar-container">', unsafe_allow_html=True)
+    if st.button("⬅️ Voltar para a Grade Principal"):
+        st.session_state.fila_selecionada = None
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Fila OA: {fila_atual}</h2>", unsafe_allow_html=True)
+    
+    df_view = df_filtrado[(df_filtrado['Tipo Aba'] == 'OA') & (df_filtrado['Fila Principal'] == fila_atual)].copy()
+    
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
+    with col_f1:
+        if fila_atual in ["CORPORATIVO", "ATRIBUÍDO AO USUÁRIO", "SAFETY", "CASOS SEM FILA - GENÉRICO"]:
+            label_filtro = "📌 Filtrar Carteira:" if fila_atual == "CORPORATIVO" else "👤 Filtrar Subfila:"
+            subfilas_disp = sorted(df_view['Subfila'].dropna().unique().tolist())
+            subfila_sel = st.selectbox(label_filtro, ["Todos"] + subfilas_disp)
+            if subfila_sel != "Todos": df_view = df_view[df_view['Subfila'] == subfila_sel]
+    with col_f2:
+        status_disp = sorted(df_view['Status'].dropna().unique().tolist())
+        status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
+        if status_sel != "Todos": df_view = df_view[df_view['Status'] == status_sel]
+            
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    vol = len(df_view)
+    trat = len(df_view[df_view['Macro Status'] == '🟡 Em Tratativa'])
+    fech = len(df_view[df_view['Macro Status'] == '🟢 Fechado'])
+    atr = len(df_view[(df_view['SLA Macro'] == '🔴 Atrasado') & (df_view['Macro Status'] == '🟡 Em Tratativa')])
+    df_fechados = df_view[df_view['Macro Status'] == '🟢 Fechado']
+    tma_str = f"{(df_fechados['Fechamento'] - df_fechados['Abertura']).dt.total_seconds().mean() / (24 * 3600):.1f} dias" if not df_fechados.empty else "N/A"
+
+    st.markdown(f"""
+    <div style="display: flex; gap: 15px; margin-bottom: 25px;">
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0056b3; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Total OA</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{vol}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #f0ad4e; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Em Tratativa</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{trat}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #00CC96; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Fechados</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{fech}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #d9534f; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Atrasados</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{atr}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    colunas_ordem_ideal = [
+        'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 
+        'Motivo', 'Detalhe', 'Substatus', 'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 
+        'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
+    ]
+    df_render = df_view[colunas_ordem_ideal].copy()
+    df_render.insert(0, 'Selecionar', False)
+    
+    def colorir_linha(row): return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
+    colunas_bloqueadas = df_render.columns.drop(['Selecionar']).tolist()
+
+    edited_df = st.data_editor(
+        df_render.style.apply(colorir_linha, axis=1),
+        column_config={
+            "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
+            "ID do Caso": None, "ID do Proprietário": None, 
+            "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
+            "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
+            "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
+            "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="large")
+        },
+        disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_oa"
+    )
+
+    casos_selecionados = edited_df[edited_df['Selecionar'] == True]
+    if not casos_selecionados.empty:
+        st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
+        c_btn1, c_btn2, c_btn3 = st.columns(3)
+        with c_btn1:
+            if st.button("🔄 Transferir Casos", use_container_width=True): modal_transferir_comentar(casos_selecionados, lista_proprietarios)
+        with c_btn2:
+            if st.button("📝 Editar Casos", use_container_width=True): modal_editar_casos(casos_selecionados, df_view)
+        with c_btn3:
+            if st.button("🔔 Criar Follow-up", use_container_width=True): modal_followup(casos_selecionados, lista_proprietarios)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    def to_excel_oa(df_export):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
+            df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
+            if df_temp['Fechamento'].notna().any(): df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
+            df_temp.to_excel(writer, index=False, sheet_name='Extrato_OA')
+        return output.getvalue()
+
+    st.download_button(
+        label=f"📥 Baixar Extrato OA ({len(df_render)} registros)",
+        data=to_excel_oa(df_render), file_name=f'extrato_oa_{fila_atual.replace(" ", "_").lower()}.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+# DETALHE DA FRANQUIA OS
+elif st.session_state.franquia_selecionada is not None:
+    fra_atual = st.session_state.franquia_selecionada
+    st.markdown('<div class="btn-voltar-container">', unsafe_allow_html=True)
+    if st.button("⬅️ Voltar para a Grade Principal"):
+        st.session_state.franquia_selecionada = None
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Franquia OS: {fra_atual}</h2>", unsafe_allow_html=True)
+    
+    df_view_os = df_filtrado[(df_filtrado['Tipo Aba'] == 'OS') & (df_filtrado['OS - Franquia'] == fra_atual)].copy()
+    
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
+    with col_f1:
+        tipos_disp = sorted(df_view_os['OS - Tipo Serviço'].dropna().unique().tolist())
+        tipo_sel = st.selectbox("🛠️ Filtrar Tipo de Serviço:", ["Todos"] + tipos_disp)
+        if tipo_sel != "Todos": df_view_os = df_view_os[df_view_os['OS - Tipo Serviço'] == tipo_sel]
+    with col_f2:
+        status_disp = sorted(df_view_os['Status'].dropna().unique().tolist())
+        status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
+        if status_sel != "Todos": df_view_os = df_view_os[df_view_os['Status'] == status_sel]
         
-        st.markdown("---")
-        st.markdown("### 📋 Tabela Detalhada de OS")
-        
-        colunas_ordem_ideal = [
-            'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Conta - Posição Fin.', 'Conta - Classificação',
-            'OS - Número', 'OS - Franquia', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Técnico',
-            'Item de Contrato', 'Asset - Status', 'Asset - Endereço', 'Asset - Instalação',
-            'Abertura', 'Fechamento', 'Status', 'SLA (Prazo)', 'Substatus', 
-            'Origem', 'Tipo Solicitação', 'Motivo', 'Detalhe',  
-            'BaseCorp Carteira', 'Descrição', 'Fila Principal', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
-        ]
-        df_render = df_view_os[colunas_ordem_ideal].copy()
-        df_render.insert(0, 'Selecionar', False)
-        
-        def colorir_linha(row): return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
-        colunas_bloqueadas = df_render.columns.drop(['Selecionar']).tolist()
+    st.markdown("### 📊 Quebra Operacional da Franquia")
+    df_breakdown = df_view_os.groupby(['OS - Tipo Serviço', 'Status']).size().reset_index(name='Quantidade')
+    if not df_breakdown.empty:
+        df_pivot = df_breakdown.pivot(index='OS - Tipo Serviço', columns='Status', values='Quantidade').fillna(0).astype(int)
+        df_pivot['Total Geral'] = df_pivot.sum(axis=1)
+        st.dataframe(df_pivot.style.background_gradient(cmap='Blues'), use_container_width=True)
+    else:
+        st.info("Nenhuma OS para o filtro selecionado.")
+    
+    st.markdown("---")
+    st.markdown("### 📋 Tabela Detalhada de OS")
+    
+    colunas_ordem_ideal = [
+        'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Conta - Posição Fin.', 'Conta - Classificação',
+        'OS - Número', 'OS - Franquia', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Técnico',
+        'Item de Contrato', 'Asset - Status', 'Asset - Endereço', 'Asset - Instalação',
+        'Abertura', 'Fechamento', 'Status', 'SLA (Prazo)', 'Substatus', 
+        'Origem', 'Tipo Solicitação', 'Motivo', 'Detalhe',  
+        'BaseCorp Carteira', 'Descrição', 'Fila Principal', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
+    ]
+    df_render = df_view_os[colunas_ordem_ideal].copy()
+    df_render.insert(0, 'Selecionar', False)
+    
+    def colorir_linha(row): return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
+    colunas_bloqueadas = df_render.columns.drop(['Selecionar']).tolist()
 
-        edited_df = st.data_editor(
-            df_render.style.apply(colorir_linha, axis=1),
-            column_config={
-                "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
-                "ID do Caso": None, "ID do Proprietário": None, 
-                "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
-                "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
-                "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
-                "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
-                "Descrição": st.column_config.TextColumn("Descrição", width="large")
-            },
-            disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_os"
-        )
+    edited_df = st.data_editor(
+        df_render.style.apply(colorir_linha, axis=1),
+        column_config={
+            "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
+            "ID do Caso": None, "ID do Proprietário": None, 
+            "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
+            "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
+            "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
+            "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="large")
+        },
+        disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_os"
+    )
 
-        casos_selecionados = edited_df[edited_df['Selecionar'] == True]
-        if not casos_selecionados.empty:
-            st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
-            c_btn1, c_btn2, c_btn3 = st.columns(3)
-            with c_btn1:
-                if st.button("🔄 Transferir OS", use_container_width=True): modal_transferir_comentar(casos_selecionados, lista_proprietarios)
-            with c_btn2:
-                if st.button("📝 Editar OS", use_container_width=True): modal_editar_casos(casos_selecionados, df_view_os)
-            with c_btn3:
-                if st.button("🔔 Criar Follow-up", use_container_width=True): modal_followup(casos_selecionados, lista_proprietarios)
+    casos_selecionados = edited_df[edited_df['Selecionar'] == True]
+    if not casos_selecionados.empty:
+        st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
+        c_btn1, c_btn2, c_btn3 = st.columns(3)
+        with c_btn1:
+            if st.button("🔄 Transferir OS", use_container_width=True): modal_transferir_comentar(casos_selecionados, lista_proprietarios)
+        with c_btn2:
+            if st.button("📝 Editar OS", use_container_width=True): modal_editar_casos(casos_selecionados, df_view_os)
+        with c_btn3:
+            if st.button("🔔 Criar Follow-up", use_container_width=True): modal_followup(casos_selecionados, lista_proprietarios)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        def to_excel_os(df_export):
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
-                df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
-                if df_temp['Fechamento'].notna().any(): df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
-                df_temp.to_excel(writer, index=False, sheet_name='Extrato_OS')
-            return output.getvalue()
+    st.markdown("<br>", unsafe_allow_html=True)
+    def to_excel_os(df_export):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
+            df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
+            if df_temp['Fechamento'].notna().any(): df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
+            df_temp.to_excel(writer, index=False, sheet_name='Extrato_OS')
+        return output.getvalue()
 
-        st.download_button(
-            label=f"📥 Baixar Extrato OS ({len(df_render)} registros)",
-            data=to_excel_os(df_render), file_name=f'extrato_os_{fra_atual.replace(" ", "_").lower()}.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
+    st.download_button(
+        label=f"📥 Baixar Extrato OS ({len(df_render)} registros)",
+        data=to_excel_os(df_render), file_name=f'extrato_os_{fra_atual.replace(" ", "_").lower()}.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
