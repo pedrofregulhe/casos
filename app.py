@@ -171,7 +171,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
-    # 🚨 DICA: Se a query quebrar avisando que "WorkOrders" não existe, mude para "WorkOrderLineItems" logo abaixo!
+    # Consulta primária (Casos, Contas, Ativos)
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description, Origin, Type, 
@@ -179,9 +179,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_CNPJ__c, Account.FOZ_Classificacao__c, Account.FOZ_StatusPosicaoFinanceira__c,
         FOZ_Asset__r.Status, FOZ_Asset__r.FOZ_EndFranquiaForm__c, FOZ_Asset__r.InstallDate, {CAMPO_ITEM_CONTRATO},
         (SELECT IsViolated, TargetDate FROM CaseMilestones ORDER BY TargetDate ASC),
-        (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC),
-        (SELECT FOZ_Numero_OS__c, FOZ_Nome_Franquia__c, FOZ_Tipo_de_Servico__c, FOZ_Agendado_para_data_periodo__c, FOZ_Id_Tecnico__c 
-         FROM WorkOrders ORDER BY CreatedDate DESC LIMIT 1)
+        (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
     FROM Case 
     WHERE (Type IN ('OA', 'OS')
            OR (Owner.Name LIKE 'CARTEIRA%') 
@@ -196,23 +194,53 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
     my_bar = st.progress(0, text="Iniciando sincronização com o Salesforce...")
     
     try:
+        # ETAPA 1: Puxa todos os casos
         result = sf_conn.query(query)
         total_records = result.get('totalSize', 0)
         records = result.get('records', [])
         
         if total_records > 0:
             current_len = len(records)
-            percent = int((current_len / total_records) * 40)
+            percent = int((current_len / total_records) * 30)
             my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
 
             while not result.get('done', True):
                 result = sf_conn.query_more(result['nextRecordsUrl'], True)
                 records.extend(result.get('records', []))
                 current_len = len(records)
-                percent = int((current_len / total_records) * 40)
+                percent = int((current_len / total_records) * 30)
                 my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
 
-        my_bar.progress(40, text="Download concluído! Estruturando inteligência de dados...")
+        my_bar.progress(35, text="Download de Casos concluído! Buscando Itens de Ordem de Serviço...")
+
+        # ETAPA 2: Consulta Secundária em Lote (Buscando o "Neto" diretamente)
+        os_dict = {}
+        case_ids = [r['Id'] for r in records]
+        
+        if case_ids:
+            chunk_size = 200 # Salesforce aceita listas curtas em comandos IN
+            for i in range(0, len(case_ids), chunk_size):
+                chunk = case_ids[i:i+chunk_size]
+                ids_str = ",".join([f"'{cid}'" for cid in chunk])
+                
+                query_os = f"""
+                SELECT WorkOrder.CaseId, FOZ_Numero_OS__c, FOZ_Nome_Franquia__c, 
+                       FOZ_Tipo_de_Servico__c, FOZ_Agendado_para_data_periodo__c, FOZ_Id_Tecnico__c
+                FROM WorkOrderLineItem 
+                WHERE WorkOrder.CaseId IN ({ids_str})
+                ORDER BY CreatedDate DESC
+                """
+                try:
+                    os_result = sf_conn.query_all(query_os)
+                    for os_rec in os_result.get('records', []):
+                        c_id = os_rec['WorkOrder']['CaseId']
+                        # Como ordenamos por DESC, o primeiro que aparecer é o mais recente
+                        if c_id not in os_dict:
+                            os_dict[c_id] = os_rec
+                except Exception as e:
+                    print(f"Aviso de Subquery OS: {e}")
+
+        my_bar.progress(50, text="Processamento inteligente de dados em andamento...")
 
         linhas = []
         hoje_utc = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -220,7 +248,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         
         for i, record in enumerate(records):
             if total_processar > 0 and i % 500 == 0:
-                progresso_atual = 40 + int((i / total_processar) * 60)
+                progresso_atual = 50 + int((i / total_processar) * 50)
                 my_bar.progress(progresso_atual, text=f"Estruturando dados visuais... {progresso_atual}%")
 
             dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
@@ -244,7 +272,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 subfila = dono_upper
                 
             macro_status = "🟢 Fechado" if record['Status'] in ['Closed', 'Fechado'] else "🟡 Em Tratativa"
-            
             data_abertura = pd.to_datetime(record['CreatedDate']).tz_localize(None)
             data_fechamento = pd.to_datetime(record['ClosedDate']).tz_localize(None) if record.get('ClosedDate') else None
             
@@ -317,20 +344,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             if raw_item_contrato and not item_contrato_limpo: item_contrato_limpo = "0"
             carteira_basecorp = basecorp_dict.get(item_contrato_limpo, "-") if item_contrato_limpo else "-"
                 
-            # --- EXTRAÇÃO DA ORDEM DE SERVIÇO (SUBQUERY) ---
-            os_numero = ""
-            os_franquia = ""
-            os_tipo_servico = ""
-            os_agendamento = ""
-            os_tecnico = ""
-            
-            if record.get('WorkOrders') and record['WorkOrders'].get('records'):
-                last_os = record['WorkOrders']['records'][0]
-                os_numero = last_os.get('FOZ_Numero_OS__c', '')
-                os_franquia = last_os.get('FOZ_Nome_Franquia__c', '')
-                os_tipo_servico = last_os.get('FOZ_Tipo_de_Servico__c', '')
-                os_agendamento = last_os.get('FOZ_Agendado_para_data_periodo__c', '')
-                os_tecnico = last_os.get('FOZ_Id_Tecnico__c', '')
+            # --- MESCLANDO A ORDEM DE SERVIÇO ---
+            case_id = record['Id']
+            os_info = os_dict.get(case_id, {})
+            os_numero = os_info.get('FOZ_Numero_OS__c', '')
+            os_franquia = os_info.get('FOZ_Nome_Franquia__c', '')
+            os_tipo_servico = os_info.get('FOZ_Tipo_de_Servico__c', '')
+            os_agendamento = os_info.get('FOZ_Agendado_para_data_periodo__c', '')
+            os_tecnico = os_info.get('FOZ_Id_Tecnico__c', '')
                 
             # --- COMENTÁRIOS E DESCRIÇÃO ---
             desc_oficial = record.get('Description')
@@ -352,7 +373,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             else:
                 descricao_final = desc_oficial if desc_oficial else "-"
                 
-            # Classifica internamente para separar as Abas
             tipo_caso = str(record.get('Type')).upper()
             tipo_aba = 'OS' if 'OS' in tipo_caso else 'OA'
                 
@@ -726,7 +746,7 @@ def render_aba_conteudo(df_aba, tipo_aba, fila_atual, lista_proprietarios):
         disabled=colunas_bloqueadas,
         use_container_width=True,
         hide_index=True,
-        key=f"editor_{fila_atual}_{tipo_aba}" # Key única para não dar conflito entre as abas
+        key=f"editor_{fila_atual}_{tipo_aba}"
     )
 
     casos_selecionados = edited_df[edited_df['Selecionar'] == True]
@@ -932,7 +952,6 @@ else:
             
     st.markdown("<br>", unsafe_allow_html=True)
             
-    # ABAS PRINCIPAIS OA e OS
     tab_oa, tab_os = st.tabs(["📁 Visão OA (Ordem de Atendimento)", "🔧 Visão OS (Ordem de Serviço)"])
 
     with tab_oa:
