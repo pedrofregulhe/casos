@@ -22,7 +22,6 @@ try:
     SF_PWD = st.secrets["SF_PASSWORD"]
     SF_TOKEN = st.secrets["SF_TOKEN"]
     
-    # Credenciais da Tela de Login do Painel
     APP_USER = st.secrets["APP_USER"]
     APP_PWD = st.secrets["APP_PWD"]
 except Exception:
@@ -30,7 +29,7 @@ except Exception:
     st.stop()
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Gestão de Casos", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Gestão de Casos (OA & OS)", layout="wide", initial_sidebar_state="expanded")
 
 # --- CSS CUSTOMIZADO ---
 st.markdown("""
@@ -101,7 +100,7 @@ def init_connection(user, pwd, token):
 try:
     sf = init_connection(SF_USER, SF_PWD, SF_TOKEN)
 except Exception as e:
-    st.error(f"❌ Falha ao conectar com o Salesforce usando as credenciais do sistema: {e}")
+    st.error(f"❌ Falha ao conectar com o Salesforce: {e}")
     st.stop()
 
 # --- LEITURA DA BASECORP (EXCEL) ---
@@ -172,18 +171,20 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # 🚨 DICA: Se a query quebrar avisando que "WorkOrders" não existe, mude para "WorkOrderLineItems" logo abaixo!
     query = f"""
     SELECT 
-        Id, CaseNumber, CreatedDate, ClosedDate, Status, Description,
-        Account.Name, Account.FOZ_CPF__c, Account.FOZ_Classificacao__c,
-        Origin, Type, FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, OwnerId, Owner.Name, 
-        FOZ_SubStatus__c,
-        {CAMPO_ITEM_CONTRATO},
+        Id, CaseNumber, CreatedDate, ClosedDate, Status, Description, Origin, Type, 
+        FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, FOZ_SubStatus__c, OwnerId, Owner.Name, 
+        Account.Name, Account.FOZ_CPF__c, Account.FOZ_CNPJ__c, Account.FOZ_Classificacao__c, Account.FOZ_StatusPosicaoFinanceira__c,
+        FOZ_Asset__r.Status, FOZ_Asset__r.FOZ_EndFranquiaForm__c, FOZ_Asset__r.InstallDate, {CAMPO_ITEM_CONTRATO},
         (SELECT IsViolated, TargetDate FROM CaseMilestones ORDER BY TargetDate ASC),
-        (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
+        (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC),
+        (SELECT FOZ_Numero_OS__c, FOZ_Nome_Franquia__c, FOZ_Tipo_de_Servico__c, FOZ_Agendado_para_data_periodo__c, FOZ_Id_Tecnico__c 
+         FROM WorkOrders ORDER BY CreatedDate DESC LIMIT 1)
     FROM Case 
-    WHERE (Type = 'OA' 
-           OR (Owner.Name LIKE 'CARTEIRA%' AND (Type != 'OS' OR Type = null)) 
+    WHERE (Type IN ('OA', 'OS')
+           OR (Owner.Name LIKE 'CARTEIRA%') 
            OR Owner.Name LIKE '%GENÉRICO%'
            OR Owner.Name LIKE '%GENERICO%'
            OR Owner.Name LIKE '%Casos sem fila%')
@@ -224,10 +225,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
             dono_upper = record['Owner']['Name'].upper() if record['Owner'] else 'SISTEMA/SEM DONO'
             
-            filas_conhecidas = [
-                "ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", 
-                "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"
-            ]
+            filas_conhecidas = ["ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"]
             
             if "SAFETY" in dono_upper:
                 fila_principal = "SAFETY"
@@ -257,7 +255,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             
             status_real_sf = record['Status'].strip().lower() if record['Status'] else ""
             
-            # REGRA CUSTOMIZADA 24H: Apenas para as duas filas específicas e casos com status ESTRITAMENTE em Aberto
             if fila_principal in ["CASOS SEM FILA - GENÉRICO", "CORPORATIVO"] and status_real_sf in ["aberto", "em aberto"]:
                 target_dt_custom = data_abertura + timedelta(hours=24)
                 diferenca_horas = (target_dt_custom - hoje_utc).total_seconds() / 3600
@@ -278,9 +275,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                         sla_visual = f"🟢 No Prazo ({int(diferenca_horas/24)} d)"
                     else:
                         sla_visual = f"🟢 No Prazo ({int(diferenca_horas)} h)"
-                        
             else:
-                # REGRA PADRÃO: CaseMilestones do Salesforce para os demais casos
                 if record['CaseMilestones'] and record['CaseMilestones'].get('records'):
                     milestones = record['CaseMilestones']['records']
                     sla_atrasado_bool = any(m.get('IsViolated') for m in milestones)
@@ -305,30 +300,50 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             fim_calc = data_fechamento if data_fechamento else hoje_utc
             idade_dias = (fim_calc - data_abertura).days
             
-            classificacao = '-'
-            if record['Account'] and record['Account'].get('FOZ_Classificacao__c'):
-                classificacao = record['Account']['FOZ_Classificacao__c']
-                
+            # --- EXTRAÇÃO DE CONTA E ATIVO ---
+            acc = record.get('Account') or {}
+            acc_name = acc.get('Name', '-')
+            acc_cnpj = acc.get('FOZ_CNPJ__c', '-')
+            acc_classificacao = acc.get('FOZ_Classificacao__c', '-')
+            acc_posfin = acc.get('FOZ_StatusPosicaoFinanceira__c', '-')
+            
+            asset = record.get('FOZ_Asset__r') or {}
+            asset_status = asset.get('Status', '-')
+            asset_end = asset.get('FOZ_EndFranquiaForm__c', '-')
+            asset_install = asset.get('InstallDate', '-')
+            
             raw_item_contrato = extract_field(record, CAMPO_ITEM_CONTRATO).strip()
             item_contrato_limpo = raw_item_contrato.lstrip('0') if raw_item_contrato else ""
-            if raw_item_contrato and not item_contrato_limpo: 
-                item_contrato_limpo = "0"
-                
+            if raw_item_contrato and not item_contrato_limpo: item_contrato_limpo = "0"
             carteira_basecorp = basecorp_dict.get(item_contrato_limpo, "-") if item_contrato_limpo else "-"
                 
+            # --- EXTRAÇÃO DA ORDEM DE SERVIÇO (SUBQUERY) ---
+            os_numero = ""
+            os_franquia = ""
+            os_tipo_servico = ""
+            os_agendamento = ""
+            os_tecnico = ""
+            
+            if record.get('WorkOrders') and record['WorkOrders'].get('records'):
+                last_os = record['WorkOrders']['records'][0]
+                os_numero = last_os.get('FOZ_Numero_OS__c', '')
+                os_franquia = last_os.get('FOZ_Nome_Franquia__c', '')
+                os_tipo_servico = last_os.get('FOZ_Tipo_de_Servico__c', '')
+                os_agendamento = last_os.get('FOZ_Agendado_para_data_periodo__c', '')
+                os_tecnico = last_os.get('FOZ_Id_Tecnico__c', '')
+                
+            # --- COMENTÁRIOS E DESCRIÇÃO ---
             desc_oficial = record.get('Description')
             historico_comentarios = ""
-            
             if record.get('CaseComments') and record['CaseComments'].get('records'):
                 for comment in record['CaseComments']['records']:
                     autor = comment['CreatedBy']['Name'] if comment.get('CreatedBy') else 'Usuário'
-                    texto = comment['CommentBody']
                     try:
                         dt_obj = pd.to_datetime(comment['CreatedDate']).tz_convert(fuso_br)
                         data_str = dt_obj.strftime('%d/%m/%Y %H:%M')
                     except:
                         data_str = comment['CreatedDate']
-                    historico_comentarios += f"🗣️ {autor} em {data_str}:\n{texto}\n\n"
+                    historico_comentarios += f"🗣️ {autor} em {data_str}:\n{comment['CommentBody']}\n\n"
             
             if desc_oficial and historico_comentarios:
                 descricao_final = f"📝 DESCRIÇÃO ORIGINAL:\n{desc_oficial}\n\n{'-'*40}\n\n💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
@@ -337,32 +352,48 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             else:
                 descricao_final = desc_oficial if desc_oficial else "-"
                 
+            # Classifica internamente para separar as Abas
+            tipo_caso = str(record.get('Type')).upper()
+            tipo_aba = 'OS' if 'OS' in tipo_caso else 'OA'
+                
             linhas.append({
                 'ID do Caso': record['Id'],
                 'ID do Proprietário': record['OwnerId'],
                 'Link Salesforce': f"{sf_base_url}{record['Id']}/view",
                 'Número': record['CaseNumber'],
+                'Tipo Aba': tipo_aba,
                 'Abertura': data_abertura,
                 'Fechamento': data_fechamento,
                 'Origem': record['Origin'],
                 'Tipo Solicitação': record['FOZ_TipoSolicitacao__c'],
                 'Motivo': record['FOZ_Motivo__c'],
+                'Detalhe': record['FOZ_Detalhe__c'],
                 'Substatus': record['FOZ_SubStatus__c'] if record['FOZ_SubStatus__c'] else "",
                 'SLA (Prazo)': sla_visual,
                 'Status': record['Status'],
                 'BaseCorp Carteira': carteira_basecorp,
+                'Conta': acc_name,
+                'Conta - CNPJ': acc_cnpj,
+                'Conta - Posição Fin.': acc_posfin,
+                'Conta - Classificação': acc_classificacao,
                 'Item de Contrato': raw_item_contrato, 
+                'Asset - Status': asset_status,
+                'Asset - Endereço': asset_end,
+                'Asset - Instalação': asset_install,
+                'OS - Número': os_numero,
+                'OS - Franquia': os_franquia,
+                'OS - Tipo Serviço': os_tipo_servico,
+                'OS - Agendamento': os_agendamento,
+                'OS - Técnico': os_tecnico,
                 'Descrição': descricao_final,
                 'Fila Principal': fila_principal,
                 'Subfila': subfila,
                 'Macro Status': macro_status,
                 'SLA Macro': sla_macro,
-                'Idade (Dias)': idade_dias,
-                'Conta': record['Account']['Name'] if record['Account'] else '-'
+                'Idade (Dias)': idade_dias
             })
             
         df_final = pd.DataFrame(linhas)
-        
         if not df_final.empty:
             df_final['Abertura'] = pd.to_datetime(df_final['Abertura'])
             df_final['Fechamento'] = pd.to_datetime(df_final['Fechamento'])
@@ -370,7 +401,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         my_bar.progress(100, text="✅ Sincronização e Processamento finalizados!")
         time.sleep(0.5)
         my_bar.empty()
-        
         return df_final
 
     except Exception as e:
@@ -380,26 +410,19 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
 
 # --- FUNÇÕES DE MODAIS E AUDITORIA AUTOMÁTICA ---
-
 def criar_comentario_auditoria(num_caso, id_caso, extra_texto=""):
-    """Gera o payload de comentário de automação padrão."""
     texto_base = "Caso editado ou movimentado via Automação."
-    if extra_texto.strip():
-        texto_base += f"\n\nObservação: {extra_texto}"
+    if extra_texto.strip(): texto_base += f"\n\nObservação: {extra_texto}"
     return {'ParentId': id_caso, 'CommentBody': texto_base}
 
 @st.dialog("📄 Resumo Diário da Operação")
 def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
     if df_dados.empty:
-        st.warning("Não há dados para resumir. Verifique os filtros de período.")
+        st.warning("Não há dados para resumir.")
         return
         
     hoje_str = datetime.now(fuso_br).strftime("%d/%m/%Y às %H:%M")
-    
-    if per_sel == "Personalizado" and dt_ini and dt_fim:
-        periodo_txt = f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
-    else:
-        periodo_txt = per_sel
+    periodo_txt = f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}" if per_sel == "Personalizado" else per_sel
     
     vol_total = len(df_dados)
     trat_total = len(df_dados[df_dados['Macro Status'] == '🟡 Em Tratativa'])
@@ -423,25 +446,17 @@ def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
             abertos_d = len(df_destaque[df_destaque['Macro Status'] == '🟡 Em Tratativa'])
             atr_d = len(df_destaque[(df_destaque['SLA Macro'] == '🔴 Atrasado') & (df_destaque['Macro Status'] == '🟡 Em Tratativa')])
             resumo += f"🔸 *{fila_destaque}:* {vol_d} Casos no total | {abertos_d} Abertos | {atr_d} Atrasados\n"
-            
-            # Detalhamento de subfilas
             subfilas = sorted(df_destaque['Subfila'].dropna().unique().tolist())
             for sub in subfilas:
                 if sub == "-": continue
                 df_sub = df_destaque[df_destaque['Subfila'] == sub]
-                vol_s = len(df_sub)
-                abertos_s = len(df_sub[df_sub['Macro Status'] == '🟡 Em Tratativa'])
-                atr_s = len(df_sub[(df_sub['SLA Macro'] == '🔴 Atrasado') & (df_sub['Macro Status'] == '🟡 Em Tratativa')])
-                resumo += f"   ↳ {sub}: {vol_s} Total | {abertos_s} Abertos | {atr_s} Atrasados\n"
+                resumo += f"   ↳ {sub}: {len(df_sub)} Total | {len(df_sub[df_sub['Macro Status'] == '🟡 Em Tratativa'])} Abertos | {len(df_sub[(df_sub['SLA Macro'] == '🔴 Atrasado') & (df_sub['Macro Status'] == '🟡 Em Tratativa')])} Atrasados\n"
             resumo += "\n"
             
     resumo += f"🏢 *DETALHAMENTO POR FILA GERAL*\n"
     filas = sorted(df_dados['Fila Principal'].dropna().unique().tolist())
-    
     for fila in filas:
-        if fila in ["ATRIBUÍDO AO USUÁRIO", "CORPORATIVO"]:
-            continue 
-            
+        if fila in ["ATRIBUÍDO AO USUÁRIO", "CORPORATIVO"]: continue 
         df_fila = df_dados[df_dados['Fila Principal'] == fila]
         vol = len(df_fila)
         trat = len(df_fila[df_fila['Macro Status'] == '🟡 Em Tratativa'])
@@ -449,42 +464,32 @@ def modal_resumo_diario(df_dados, per_sel, dt_ini, dt_fim):
         atr = len(df_fila[(df_fila['SLA Macro'] == '🔴 Atrasado') & (df_fila['Macro Status'] == '🟡 Em Tratativa')])
         
         df_fech = df_fila[df_fila['Macro Status'] == '🟢 Fechado']
-        tma_str = "N/A"
-        if not df_fech.empty:
-            tma_dias = (df_fech['Fechamento'] - df_fech['Abertura']).dt.total_seconds().mean() / (24 * 3600)
-            tma_str = f"{tma_dias:.1f} dias"
+        tma_str = f"{(df_fech['Fechamento'] - df_fech['Abertura']).dt.total_seconds().mean() / (24 * 3600):.1f} dias" if not df_fech.empty else "N/A"
             
         resumo += f"\n🔹 *{fila}*\n"
         resumo += f"   Total: {vol} | Abertos: {trat} | Fechados: {fech}\n"
         resumo += f"   SLA Atrasado: {atr} | TMA Médio: {tma_str}\n"
 
-    st.markdown("💡 **Clique no ícone de 'Copiar'** no canto superior direito do quadro abaixo para copiar todo o texto formatado para o seu e-mail ou comunicador corporativo.")
+    st.markdown("💡 **Clique no ícone de 'Copiar'** no canto superior direito para copiar.")
     st.code(resumo, language="markdown")
 
 @st.dialog("🔄 Transferir e Comentar")
-def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
+def modal_transferir_comentar(casos_selecionados_df, lista_prop):
     st.markdown(f"Você está transferindo **{len(casos_selecionados_df)} caso(s)**.")
-    
-    casos_com_basecorp = casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-']
-    tem_basecorp = not casos_com_basecorp.empty
-    
+    tem_basecorp = not casos_selecionados_df[casos_selecionados_df['BaseCorp Carteira'] != '-'].empty
     modo_transferencia = "Manual"
     dono_selecionado = None
     
     if tem_basecorp:
-        st.info(f"🎯 Identificamos {len(casos_com_basecorp)} caso(s) com mapeamento na BaseCorp.")
-        modo_transferencia = st.radio("Como deseja realizar a transferência?", 
-                                      ["Manual (Escolher nova fila/usuário)", "Inteligente (Usar roteamento BaseCorp)"])
+        st.info("🎯 Identificamos caso(s) com mapeamento na BaseCorp.")
+        modo_transferencia = st.radio("Como deseja realizar a transferência?", ["Manual (Escolher nova fila/usuário)", "Inteligente (Usar roteamento BaseCorp)"])
         
     if modo_transferencia.startswith("Manual"):
         dono_selecionado = st.selectbox("Selecione o Novo Proprietário (*Obrigatório*):", [""] + list(lista_prop.keys()))
-    else:
-        st.caption("💡 Os casos com BaseCorp serão enviados para as carteiras correspondentes. Casos sem mapeamento exigirão transferência manual depois.")
         
     novo_comentario = st.text_area("Adicionar Comentário Opcional:", height=68)
     
     st.markdown("---")
-    st.markdown("**🛡️ Segurança e Auditoria**")
     sem_comentario = st.checkbox("Movimentar sem inserir o comentário padrão de automação", value=False)
     senha_input = st.text_input("🔑 Senha do Salesforce (*Obrigatória*)", type="password")
     
@@ -492,133 +497,96 @@ def modal_transferir_comentar(casos_selecionados_df, lista_prop, api_usr_id):
         if senha_input != SF_PWD:
             st.error("⚠️ Senha incorreta. Operação cancelada.")
             return
-            
         if modo_transferencia.startswith("Manual") and not dono_selecionado:
-            st.warning("⚠️ Por favor, selecione um proprietário para transferir.")
+            st.warning("⚠️ Selecione um proprietário para transferir.")
             return
             
-        with st.spinner("Processando atualizações e validando regras no Salesforce..."):
-            sucessos = 0
-            erros = []
-            comentarios_payload = []
-            
+        with st.spinner("Processando..."):
+            sucessos, erros, comentarios_payload = 0, [], []
             for _, row in casos_selecionados_df.iterrows():
                 id_caso = row['ID do Caso']
                 num_caso = row['Número']
-                
-                is_fechado = row['Status'] in ['Closed', 'Fechado']
-                if is_fechado:
-                    erros.append(f"Caso {num_caso} ignorado: Salesforce bloqueia transferência de casos fechados.")
+                if row['Status'] in ['Closed', 'Fechado']:
+                    erros.append(f"Caso {num_caso} ignorado: Caso fechado.")
                     continue
                 
-                novo_id = None
-                if modo_transferencia.startswith("Manual"):
-                    novo_id = lista_prop[dono_selecionado]
-                else:
+                novo_id = lista_prop.get(dono_selecionado) if modo_transferencia.startswith("Manual") else None
+                if not modo_transferencia.startswith("Manual"):
                     carteira_bc = row['BaseCorp Carteira']
-                    if carteira_bc == '-':
-                        erros.append(f"Caso {num_caso} ignorado: Sem mapeamento na BaseCorp.")
-                        continue
-                    for key, val in lista_prop.items():
-                        key_clean = key.replace('📁', '').replace('👤', '').strip().upper()
-                        if carteira_bc.strip().upper() in key_clean:
-                            novo_id = val
-                            break
-                    if not novo_id:
-                        erros.append(f"Caso {num_caso} ignorado: Carteira '{carteira_bc}' não achada no Salesforce.")
-                        continue
+                    if carteira_bc != '-':
+                        for key, val in lista_prop.items():
+                            if carteira_bc.strip().upper() in key.replace('📁', '').replace('👤', '').strip().upper():
+                                novo_id = val
+                                break
                 
-                try:
-                    payload = {'OwnerId': novo_id, 'FOZ_Bypass_Flow__c': True}
-                    sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    sf.Case.update(id_caso, {'FOZ_Bypass_Flow__c': False}, headers={'Sforce-Auto-Assign': 'FALSE'})
-                    sucessos += 1
-                    
-                    if not sem_comentario or novo_comentario.strip():
-                        if not sem_comentario:
-                            comentarios_payload.append(criar_comentario_auditoria(num_caso, id_caso, novo_comentario))
-                        elif novo_comentario.strip():
-                            comentarios_payload.append({'ParentId': id_caso, 'CommentBody': novo_comentario})
-                            
-                except Exception as e:
-                    erros.append(f"Transferência bloqueada no caso {num_caso}: {str(e)}")
+                if novo_id:
+                    try:
+                        sf.Case.update(id_caso, {'OwnerId': novo_id, 'FOZ_Bypass_Flow__c': True}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                        sf.Case.update(id_caso, {'FOZ_Bypass_Flow__c': False}, headers={'Sforce-Auto-Assign': 'FALSE'})
+                        sucessos += 1
+                        if not sem_comentario or novo_comentario.strip():
+                            comentarios_payload.append(criar_comentario_auditoria(num_caso, id_caso, novo_comentario) if not sem_comentario else {'ParentId': id_caso, 'CommentBody': novo_comentario})
+                    except Exception as e:
+                        erros.append(f"Erro no caso {num_caso}: {str(e)}")
             
             if comentarios_payload:
-                try:
-                    sf.bulk.CaseComment.insert(comentarios_payload)
-                except Exception as e:
-                    erros.append(f"Erro ao inserir comentários de auditoria: {str(e)}")
+                try: sf.bulk.CaseComment.insert(comentarios_payload)
+                except: pass
             
             if erros:
                 for err in erros: st.error(err)
             if sucessos > 0:
-                st.toast(f"✅ {sucessos} caso(s) transferido(s) com sucesso!")
+                st.toast(f"✅ {sucessos} transferido(s)!")
                 time.sleep(1.5)
                 st.cache_data.clear()
                 st.rerun()
 
 @st.dialog("📝 Editar Casos")
-def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
-    st.markdown(f"Você está editando **{len(casos_selecionados_df)} caso(s)**.")
-    
+def modal_editar_casos(casos_selecionados_df, df_view):
+    st.markdown(f"Editando **{len(casos_selecionados_df)} caso(s)**.")
     opcoes_status = sorted(df_view['Status'].dropna().unique().tolist())
-    if "Fechado" not in opcoes_status:
-        opcoes_status.append("Fechado")
+    if "Fechado" not in opcoes_status: opcoes_status.append("Fechado")
         
     novo_status = st.selectbox("Novo Status:", opcoes_status, index=None, placeholder="Selecione para alterar...")
-    
-    opcoes_substatus = ["Sucesso", "Insucesso", "Indevido", "Limpar Campo (Vazio)"]
-    novo_substatus = st.selectbox("Novo Substatus:", opcoes_substatus, index=None, placeholder="Selecione para alterar...")
+    novo_substatus = st.selectbox("Novo Substatus:", ["Sucesso", "Insucesso", "Indevido", "Limpar Campo (Vazio)"], index=None, placeholder="Selecione para alterar...")
     
     st.markdown("---")
-    st.markdown("**🛡️ Segurança e Auditoria**")
     sem_comentario = st.checkbox("Movimentar sem inserir o comentário padrão de automação", value=False)
     senha_input = st.text_input("🔑 Senha do Salesforce (*Obrigatória*)", type="password")
     
     if st.button("💾 Confirmar Edições", type="primary", use_container_width=True):
         if senha_input != SF_PWD:
-            st.error("⚠️ Senha incorreta. Operação cancelada.")
+            st.error("⚠️ Senha incorreta.")
             return
-            
         if not novo_status and not novo_substatus:
             st.warning("Nenhuma alteração selecionada.")
             return
             
-        with st.spinner("Processando edições no Salesforce..."):
-            sucessos = 0
-            erros = []
-            comentarios_payload = []
-            
+        with st.spinner("Editando..."):
+            sucessos, erros, comentarios_payload = 0, [], []
             for _, row in casos_selecionados_df.iterrows():
-                id_caso = row['ID do Caso']
-                num_caso = row['Número']
-                
+                id_caso, num_caso = row['ID do Caso'], row['Número']
                 payload = {'FOZ_Bypass_Flow__c': True}
                 if novo_status: payload['Status'] = novo_status
-                if novo_substatus: 
-                    payload['FOZ_SubStatus__c'] = "" if novo_substatus == "Limpar Campo (Vazio)" else novo_substatus
+                if novo_substatus: payload['FOZ_SubStatus__c'] = "" if novo_substatus == "Limpar Campo (Vazio)" else novo_substatus
                     
                 try:
                     sf.Case.update(id_caso, payload, headers={'Sforce-Auto-Assign': 'FALSE'})
                     sf.Case.update(id_caso, {'FOZ_Bypass_Flow__c': False}, headers={'Sforce-Auto-Assign': 'FALSE'})
                     sucessos += 1
-                    
                     if not sem_comentario:
-                        comentarios_payload.append(criar_comentario_auditoria(num_caso, id_caso, f"Edição em Lote - Status: {novo_status if novo_status else 'Mantido'} | Substatus: {novo_substatus if novo_substatus else 'Mantido'}"))
-                        
+                        comentarios_payload.append(criar_comentario_auditoria(num_caso, id_caso, f"Edição em Lote - Status: {novo_status or 'Mantido'} | Substatus: {novo_substatus or 'Mantido'}"))
                 except Exception as e:
                     erros.append(f"Erro no caso {num_caso}: {str(e)}")
             
             if comentarios_payload:
-                try:
-                    sf.bulk.CaseComment.insert(comentarios_payload)
-                except:
-                    pass
-                    
+                try: sf.bulk.CaseComment.insert(comentarios_payload)
+                except: pass
+            
             if erros:
                 for err in erros: st.error(err)
             if sucessos > 0:
-                st.toast(f"✅ {sucessos} caso(s) editado(s) com sucesso!")
+                st.toast(f"✅ {sucessos} editado(s)!")
                 time.sleep(1.5)
                 st.cache_data.clear()
                 st.rerun()
@@ -626,57 +594,174 @@ def modal_editar_casos(casos_selecionados_df, df_view, api_usr_id):
 @st.dialog("🔔 Criar Tarefa de Follow-up")
 def modal_followup(casos_selecionados_df, lista_prop):
     st.markdown(f"Criando follow-up para **{len(casos_selecionados_df)} caso(s)**.")
-    
     users_followup = st.multiselect("Notificar / Atribuir Tarefa para (Selecione vários se desejar):", list(lista_prop.keys()))
-    descricao_followup = st.text_area("Comentário / Descrição da Tarefa:", height=100)
+    descricao_followup = st.text_area("Descrição da Tarefa:", height=100)
     
     st.markdown("---")
-    st.markdown("**🛡️ Segurança e Auditoria**")
     sem_comentario = st.checkbox("Movimentar sem inserir o comentário padrão de automação", value=False)
     senha_input = st.text_input("🔑 Senha do Salesforce (*Obrigatória*)", type="password")
     
     if st.button("Confirmar Follow-up", type="primary", use_container_width=True):
         if senha_input != SF_PWD:
-            st.error("⚠️ Senha incorreta. Operação cancelada.")
+            st.error("⚠️ Senha incorreta.")
             return
-            
         if not users_followup or not descricao_followup.strip():
-            st.warning("⚠️ Selecione pelo menos um usuário e digite a descrição da tarefa.")
+            st.warning("⚠️ Preencha os campos.")
             return
             
-        with st.spinner("Registrando tarefas no Salesforce..."):
+        with st.spinner("Registrando tarefas..."):
             try:
-                payload = []
-                comentarios_payload = []
-                
+                payload, comentarios_payload = [], []
                 for user_nome in users_followup:
-                    dono_id_tarefa = lista_prop[user_nome]
                     for _, row in casos_selecionados_df.iterrows():
-                        id_caso = row['ID do Caso']
-                        payload.append({
-                            'WhatId': id_caso,
-                            'OwnerId': dono_id_tarefa,
-                            'Subject': 'Ação Requerida',
-                            'Description': descricao_followup,
-                            'Status': 'Open',
-                            'Priority': 'Normal'
-                        })
-                        if not sem_comentario:
-                            comentarios_payload.append(criar_comentario_auditoria(row['Número'], id_caso, "Nova Tarefa de Follow-up criada."))
+                        payload.append({'WhatId': row['ID do Caso'], 'OwnerId': lista_prop[user_nome], 'Subject': 'Ação Requerida', 'Description': descricao_followup, 'Status': 'Open', 'Priority': 'Normal'})
+                        if not sem_comentario: comentarios_payload.append(criar_comentario_auditoria(row['Número'], row['ID do Caso'], "Nova Tarefa criada."))
                             
                 sf.bulk.Task.insert(payload)
-                
                 if comentarios_payload:
-                    comentarios_unicos = {c['ParentId']: c for c in comentarios_payload}.values()
-                    try: sf.bulk.CaseComment.insert(list(comentarios_unicos))
+                    try: sf.bulk.CaseComment.insert(list({c['ParentId']: c for c in comentarios_payload}.values()))
                     except: pass
-                    
-                st.toast(f"✅ {len(payload)} Tarefas de Follow-up criadas com sucesso!")
+                st.toast(f"✅ {len(payload)} Tarefas criadas!")
                 time.sleep(1.5)
                 st.cache_data.clear()
                 st.rerun()
             except Exception as e:
-                st.error(f"Erro ao criar Follow-up: {e}")
+                st.error(f"Erro: {e}")
+
+# --- FUNÇÃO GENÉRICA DE RENDERIZAÇÃO DE TELA (ABAS OA/OS) ---
+def render_aba_conteudo(df_aba, tipo_aba, fila_atual, lista_proprietarios):
+    if df_aba.empty:
+        st.info(f"Nenhum caso do tipo **{tipo_aba}** encontrado nesta visão.")
+        return
+
+    vol = len(df_aba)
+    trat = len(df_aba[df_aba['Macro Status'] == '🟡 Em Tratativa'])
+    fech = len(df_aba[df_aba['Macro Status'] == '🟢 Fechado'])
+    atr = len(df_aba[(df_aba['SLA Macro'] == '🔴 Atrasado') & (df_aba['Macro Status'] == '🟡 Em Tratativa')])
+    tma_str = "N/A"
+    df_fechados = df_aba[df_aba['Macro Status'] == '🟢 Fechado']
+    if not df_fechados.empty:
+        tma_dias = (df_fechados['Fechamento'] - df_fechados['Abertura']).dt.total_seconds().mean() / (24 * 3600)
+        tma_str = f"{tma_dias:.1f} dias"
+
+    st.markdown(f"""
+    <div style="display: flex; gap: 15px; margin-bottom: 25px;">
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0056b3; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Total de Casos ({tipo_aba})</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{vol}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #f0ad4e; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Em Tratativa</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{trat}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #00CC96; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Fechados</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{fech}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #6f42c1; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">TMA Médio</div>
+            <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{tma_str}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        df_abertos = df_aba[df_aba['Macro Status'] == '🟡 Em Tratativa'].copy()
+        if not df_abertos.empty:
+            df_abertos['Idade'] = (datetime.now(timezone.utc).replace(tzinfo=None) - df_abertos['Abertura']).dt.days
+            df_abertos['Faixa'] = pd.cut(df_abertos['Idade'], bins=[-1, 3, 7, 10000], labels=['0 a 3 Dias', '4 a 7 Dias', '+7 Dias'])
+            df_age = df_abertos['Faixa'].value_counts().reindex(['0 a 3 Dias', '4 a 7 Dias', '+7 Dias']).reset_index()
+            fig_age = px.bar(df_age, x='Faixa', y='count', title='Idade dos Casos Abertos', text='count', color='Faixa', color_discrete_map={'0 a 3 Dias':'#0056b3', '4 a 7 Dias':'#f0ad4e', '+7 Dias':'#d9534f'})
+            fig_age.update_traces(textposition='outside', showlegend=False)
+            fig_age.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_age, use_container_width=True)
+            
+    with c2:
+        df_sla = df_aba['SLA Macro'].value_counts().reset_index()
+        if not df_sla.empty:
+            fig_sla = px.pie(df_sla, names='SLA Macro', values='count', hole=0.5, title='Saúde do SLA (Total)', color='SLA Macro', color_discrete_map={'✅ No Prazo':'#00CC96', '🔴 Atrasado':'#EF553B'})
+            fig_sla.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_sla, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown(f"### 🛠️ Tabela de Casos ({tipo_aba})")
+    
+    # Define as colunas específicas para cada aba
+    if tipo_aba == "OA":
+        colunas_ordem_ideal = [
+            'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 
+            'Motivo', 'Detalhe', 'Substatus', 'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 
+            'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
+        ]
+    else:
+        colunas_ordem_ideal = [
+            'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Conta - Posição Fin.', 'Conta - Classificação',
+            'OS - Número', 'OS - Franquia', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Técnico',
+            'Item de Contrato', 'Asset - Status', 'Asset - Endereço', 'Asset - Instalação',
+            'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo', 'Detalhe', 'Substatus', 
+            'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
+        ]
+        
+    df_render = df_aba[colunas_ordem_ideal].copy()
+    df_render.insert(0, 'Selecionar', False)
+    
+    def colorir_linha(row):
+        return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
+
+    colunas_bloqueadas = df_render.columns.drop(['Selecionar']).tolist()
+
+    edited_df = st.data_editor(
+        df_render.style.apply(colorir_linha, axis=1),
+        column_config={
+            "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
+            "ID do Caso": None, 
+            "ID do Proprietário": None, 
+            "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
+            "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
+            "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
+            "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="large")
+        },
+        disabled=colunas_bloqueadas,
+        use_container_width=True,
+        hide_index=True,
+        key=f"editor_{fila_atual}_{tipo_aba}" # Key única para não dar conflito entre as abas
+    )
+
+    casos_selecionados = edited_df[edited_df['Selecionar'] == True]
+    if not casos_selecionados.empty:
+        st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
+        c_btn1, c_btn2, c_btn3 = st.columns(3)
+        with c_btn1:
+            if st.button(f"🔄 Transferir Casos ({tipo_aba})", use_container_width=True, key=f"btn_transf_{tipo_aba}"):
+                modal_transferir_comentar(casos_selecionados, lista_proprietarios)
+        with c_btn2:
+            if st.button(f"📝 Editar Casos ({tipo_aba})", use_container_width=True, key=f"btn_edit_{tipo_aba}"):
+                modal_editar_casos(casos_selecionados, df_aba)
+        with c_btn3:
+            if st.button(f"🔔 Criar Follow-up ({tipo_aba})", use_container_width=True, key=f"btn_fup_{tipo_aba}"):
+                modal_followup(casos_selecionados, lista_proprietarios)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    def to_excel(df_export):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
+            df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
+            if df_temp['Fechamento'].notna().any():
+                df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
+            df_temp.to_excel(writer, index=False, sheet_name=f'Extrato_{tipo_aba}')
+        return output.getvalue()
+
+    st.download_button(
+        label=f"📥 Baixar Extrato {tipo_aba} ({len(df_render)} registros)",
+        data=to_excel(df_render),
+        file_name=f'extrato_{tipo_aba}_{fila_atual.replace(" ", "_").lower()}.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        key=f"btn_dw_{tipo_aba}"
+    )
+
 
 # --- FUNÇÃO PARA DESENHAR O CARD QUADRADO ---
 def desenhar_card(fila_nome, df_fila):
@@ -847,143 +932,11 @@ else:
             
     st.markdown("<br>", unsafe_allow_html=True)
             
-    tab1, tab2 = st.tabs(["📊 Indicadores Operacionais", "🛠️ Ações em Massa & Extrato"])
+    # ABAS PRINCIPAIS OA e OS
+    tab_oa, tab_os = st.tabs(["📁 Visão OA (Ordem de Atendimento)", "🔧 Visão OS (Ordem de Serviço)"])
 
-    with tab1:
-        vol = len(df_view)
-        trat = len(df_view[df_view['Macro Status'] == '🟡 Em Tratativa'])
-        fech = len(df_view[df_view['Macro Status'] == '🟢 Fechado'])
-        df_fechados = df_view[df_view['Macro Status'] == '🟢 Fechado']
-        
-        if not df_fechados.empty:
-            tma_dias = (df_fechados['Fechamento'] - df_fechados['Abertura']).dt.total_seconds().mean() / (24 * 3600)
-            tma_str = f"{tma_dias:.1f} dias"
-        else:
-            tma_str = "N/A"
+    with tab_oa:
+        render_aba_conteudo(df_view[df_view['Tipo Aba'] == 'OA'], "OA", fila_atual, lista_proprietarios)
 
-        st.markdown(f"""
-        <div style="display: flex; gap: 15px; margin-bottom: 25px;">
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0056b3; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Total de Casos</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{vol}</div>
-            </div>
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #f0ad4e; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Em Tratativa</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{trat}</div>
-            </div>
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #00CC96; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">Fechados</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{fech}</div>
-            </div>
-            <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #6f42c1; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-                <div style="font-size: 11px; color: #6c757d; text-transform: uppercase; font-weight: bold;">TMA (Casos Fechados)</div>
-                <div style="font-size: 22px; color: #0c1c2b; font-weight: bold;">{tma_str}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        c1, c2 = st.columns(2, gap="large")
-        with c1:
-            df_abertos = df_view[df_view['Macro Status'] == '🟡 Em Tratativa'].copy()
-            if not df_abertos.empty:
-                df_abertos['Idade'] = (datetime.now(timezone.utc).replace(tzinfo=None) - df_abertos['Abertura']).dt.days
-                bins = [-1, 3, 7, 10000]
-                labels = ['0 a 3 Dias', '4 a 7 Dias', '+7 Dias']
-                df_abertos['Faixa'] = pd.cut(df_abertos['Idade'], bins=bins, labels=labels)
-                df_age = df_abertos['Faixa'].value_counts().reindex(labels).reset_index()
-                
-                fig_age = px.bar(df_age, x='Faixa', y='count', title='Idade dos Casos Abertos', text='count', color='Faixa',
-                                 color_discrete_map={'0 a 3 Dias':'#0056b3', '4 a 7 Dias':'#f0ad4e', '+7 Dias':'#d9534f'})
-                fig_age.update_traces(textposition='outside', showlegend=False)
-                fig_age.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_age, use_container_width=True)
-            else:
-                st.info("Nenhum caso em aberto no momento para o filtro selecionado.")
-                
-        with c2:
-            df_sla = df_view['SLA Macro'].value_counts().reset_index()
-            if not df_sla.empty:
-                fig_sla = px.pie(df_sla, names='SLA Macro', values='count', hole=0.5, title='Saúde do SLA (Total)', 
-                                 color='SLA Macro', color_discrete_map={'✅ No Prazo':'#00CC96', '🔴 Atrasado':'#EF553B'})
-                fig_sla.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0), plot_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_sla, use_container_width=True)
-            else:
-                st.info("Nenhum dado de SLA para exibir neste filtro.")
-
-    with tab2:
-        colunas_ordem_ideal = [
-            'Número', 'Link Salesforce', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 'Motivo', 'Substatus',
-            'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 'Descrição', 
-            'Fila Principal', 'Subfila', 'Macro Status', 'Idade (Dias)', 'Conta', 'ID do Caso', 'ID do Proprietário'
-        ]
-        df_view = df_view[colunas_ordem_ideal]
-        df_view.insert(0, 'Selecionar', False)
-        
-        container_acoes = st.container()
-        st.markdown("<br>", unsafe_allow_html=True)
-        container_tabela = st.container()
-        container_rodape = st.container()
-        
-        with container_tabela:
-            st.caption("💡 **Dica:** Marque a caixa 'Selecionar' na tabela para exibir os **Botões de Ação** no topo.")
-
-            def colorir_linha(row):
-                return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
-
-            colunas_bloqueadas = df_view.columns.drop(['Selecionar']).tolist()
-
-            edited_df = st.data_editor(
-                df_view.style.apply(colorir_linha, axis=1),
-                column_config={
-                    "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
-                    "ID do Caso": None, 
-                    "ID do Proprietário": None, 
-                    "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
-                    "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
-                    "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
-                    "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
-                    "Descrição": st.column_config.TextColumn("Descrição", width="large")
-                },
-                disabled=colunas_bloqueadas,
-                use_container_width=True,
-                hide_index=True,
-                key=f"editor_{fila_atual}"
-            )
-        
-        casos_selecionados = edited_df[edited_df['Selecionar'] == True]
-        
-        with container_acoes:
-            if not casos_selecionados.empty:
-                st.markdown(f"**⚡ Ações Disponíveis para {len(casos_selecionados)} caso(s) selecionado(s):**")
-                
-                c_btn1, c_btn2, c_btn3 = st.columns(3)
-                
-                with c_btn1:
-                    if st.button("🔄 Transferir e Comentar", use_container_width=True):
-                        modal_transferir_comentar(casos_selecionados, lista_proprietarios, api_user_id)
-                with c_btn2:
-                    if st.button("📝 Editar Casos", use_container_width=True):
-                        modal_editar_casos(casos_selecionados, df_view, api_user_id)
-                with c_btn3:
-                    if st.button("🔔 Criar Follow-up", use_container_width=True):
-                        modal_followup(casos_selecionados, lista_proprietarios)
-
-        with container_rodape:
-            st.markdown("---")
-            
-            def to_excel(df_export):
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
-                    df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
-                    if df_temp['Fechamento'].notna().any():
-                        df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
-                    df_temp.to_excel(writer, index=False, sheet_name='Extrato')
-                return output.getvalue()
-
-            st.download_button(
-                label=f"📥 Baixar Extrato ({len(df_view)} registros)",
-                data=to_excel(df_view),
-                file_name=f'extrato_{fila_atual.replace(" ", "_").lower()}.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
+    with tab_os:
+        render_aba_conteudo(df_view[df_view['Tipo Aba'] == 'OS'], "OS", fila_atual, lista_proprietarios)
