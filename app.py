@@ -437,7 +437,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'OS - Base (Rota)': os_base_roteirizacao,
                 'OS - Tipo Serviço': os_tipo_servico,
                 'OS - Agendamento': os_agendamento,
-                'OS - Data Agendamento': os_data_agendamento, # Nova Coluna
+                'OS - Data Agendamento': os_data_agendamento, 
                 'OS - Técnico': os_tecnico,
                 'Descrição': descricao_final,
                 'Fila Principal': fila_principal,
@@ -683,7 +683,7 @@ def modal_followup(casos_selecionados_df, lista_prop):
                 st.error(f"Erro: {e}")
 
 # --- RENDERIZAÇÃO DE CARDS DINÂMICOS ---
-def desenhar_card(titulo, df_subset, tipo, df_cap=None):
+def desenhar_card(titulo, df_subset, tipo, df_cap=None, data_filtro=None):
     if tipo == "OA":
         vol = len(df_subset)
         trat = len(df_subset[df_subset['Macro Status'] == '🟡 Em Tratativa'])
@@ -709,11 +709,13 @@ def desenhar_card(titulo, df_subset, tipo, df_cap=None):
             st.rerun()
 
     elif tipo == "OS":
-        hoje_str = datetime.now(fuso_br).strftime("%d/%m/%Y")
-        df_hoje = df_subset[df_subset['OS - Data Agendamento'] == hoje_str]
+        data_ref = data_filtro if data_filtro else datetime.now(fuso_br).strftime("%d/%m/%Y")
+        label_dia = f"{data_ref}" if data_filtro else f"Hoje ({data_ref})"
         
-        vol = len(df_hoje)
-        status_counts = df_hoje['Status'].value_counts()
+        df_dia = df_subset[df_subset['OS - Data Agendamento'] == data_ref]
+        
+        vol = len(df_dia)
+        status_counts = df_dia['Status'].value_counts()
         
         agendado = status_counts.get('Agendado', 0)
         aguardando = status_counts.get('Aguardando Produto', 0)
@@ -723,14 +725,14 @@ def desenhar_card(titulo, df_subset, tipo, df_cap=None):
         
         cap_total = 0
         if df_cap is not None and not df_cap.empty:
-            bases_da_franquia = df_subset['OS - Base (Rota)'].unique()
-            df_cap_hoje = df_cap[(df_cap['Data do Registro'] == hoje_str) & (df_cap['Prestador de Serviço'].isin(bases_da_franquia))]
-            cap_total = int(pd.to_numeric(df_cap_hoje['Capacidade'], errors='coerce').sum())
+            bases_da_franquia = [b for b in df_subset['OS - Base (Rota)'].unique() if str(b).strip() != '']
+            df_cap_dia = df_cap[(df_cap['Data do Registro'] == data_ref) & (df_cap['Prestador de Serviço'].isin(bases_da_franquia))]
+            cap_total = int(pd.to_numeric(df_cap_dia['Capacidade'], errors='coerce').sum())
             
         html_card = f"""
         <div style="background-color: white; border: 1px solid #dce1e6; border-radius: 8px 8px 0px 0px; padding: 15px; height: 240px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: space-between; border-top: 4px solid #0056b3;">
             <h4 style="margin: 0; padding: 0; color: #0c1c2b; font-size: 14px; text-align: center; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{titulo}">{titulo}</h4>
-            <div style="text-align: center; font-size: 11px; color: #666; margin-bottom: 5px; font-weight: bold;">📊 Visão Hoje ({hoje_str})</div>
+            <div style="text-align: center; font-size: 11px; color: #666; margin-bottom: 5px; font-weight: bold;">📊 Visão {label_dia}</div>
             <div style="font-size: 12px; color: #495057; line-height: 1.6;">
                 <div style="display: flex; justify-content: space-between;"><span>Todos:</span> <b>{vol}</b></div>
                 <div style="display: flex; justify-content: space-between;"><span>Agendado:</span> <b>{agendado}</b></div>
@@ -873,7 +875,7 @@ elif st.session_state.fila_selecionada is None and st.session_state.franquia_sel
         else:
             st.markdown("### 🔍 Filtro Rápido de Agendamento")
             
-            # Novo Filtro por DATA em vez de selectbox
+            # Filtro por DATA nativo em vez de selectbox
             data_agendamento_global = st.date_input("📅 Filtrar Agendamento (Data Exata):", value=None)
             agendamento_global_sel_str = data_agendamento_global.strftime('%d/%m/%Y') if data_agendamento_global else None
             
@@ -885,7 +887,7 @@ elif st.session_state.fila_selecionada is None and st.session_state.franquia_sel
             for i, fra in enumerate(franquias):
                 df_fra = df_os[df_os['OS - Franquia'] == fra]
                 with cols[i % 4]:
-                    desenhar_card(fra, df_fra, "OS", df_capacidade)
+                    desenhar_card(fra, df_fra, "OS", df_capacidade, agendamento_global_sel_str)
                     st.markdown("<br>", unsafe_allow_html=True)
 
 # DETALHE DA FILA OA
@@ -968,7 +970,8 @@ elif st.session_state.fila_selecionada is not None:
         disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_oa"
     )
 
-    casos_selecionados = df_view.iloc[edited_df[edited_df['Selecionar'] == True].index]
+    # CORREÇÃO APLICADA AQUI PARA O ERRO DO INDEX
+    casos_selecionados = df_view[edited_df['Selecionar'].fillna(False).astype(bool).tolist()]
     
     if not casos_selecionados.empty:
         st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
