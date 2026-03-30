@@ -175,12 +175,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
 
     filtro_status = "" if incluir_fechados else "AND Status != 'Closed' AND Status != 'Fechado'"
 
+    # NOVA QUERY COM O ENDEREÇO DE ENTREGA DO ATIVO
     query = f"""
     SELECT 
         Id, CaseNumber, CreatedDate, ClosedDate, Status, Description, Origin, Type, 
         FOZ_TipoSolicitacao__c, FOZ_Motivo__c, FOZ_Detalhe__c, FOZ_Subdetalhe__c, FOZ_SubStatus__c, OwnerId, Owner.Name, 
         Account.Name, Account.FOZ_CPF__c, Account.FOZ_CNPJ__c, Account.FOZ_Classificacao__c, Account.FOZ_StatusPosicaoFinanceira__c,
-        FOZ_Asset__r.Status, FOZ_Asset__r.FOZ_EndFranquiaForm__c, FOZ_Asset__r.InstallDate, {CAMPO_ITEM_CONTRATO},
+        FOZ_Asset__r.Status, FOZ_Asset__r.FOZ_EndFranquiaForm__c, FOZ_Asset__r.InstallDate, 
+        FOZ_Asset__r.FOZ_EnderecoEntrega__r.FOZ_FranquiaAtendimento__c, {CAMPO_ITEM_CONTRATO},
         (SELECT IsViolated, TargetDate FROM CaseMilestones ORDER BY TargetDate ASC),
         (SELECT CommentBody, CreatedBy.Name, CreatedDate FROM CaseComments ORDER BY CreatedDate ASC)
     FROM Case 
@@ -335,7 +337,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             fim_calc = data_fechamento if data_fechamento else hoje_utc
             idade_dias = (fim_calc - data_abertura).days
             
-            # --- BLINDAGEM CONTRA NULOS NAS EXTRAÇÕES ---
+            # --- EXTRAÇÃO DE CONTA E ATIVO ---
             acc = record.get('Account') or {}
             acc_name = str(acc.get('Name') or '-')
             acc_cnpj = str(acc.get('FOZ_CNPJ__c') or '-')
@@ -347,6 +349,12 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             asset_end = str(asset.get('FOZ_EndFranquiaForm__c') or '-')
             asset_install = str(asset.get('InstallDate') or '-')
             
+            # EXTRAINDO A FRANQUIA OFICIAL DO ENDEREÇO DE ENTREGA
+            asset_endereco_entrega = asset.get('FOZ_EnderecoEntrega__r') or {}
+            os_franquia_principal = str(asset_endereco_entrega.get('FOZ_FranquiaAtendimento__c') or '').strip()
+            if not os_franquia_principal:
+                os_franquia_principal = "FRANQUIA NÃO INFORMADA"
+            
             raw_item_contrato = str(extract_field(record, CAMPO_ITEM_CONTRATO) or '').strip()
             item_contrato_limpo = raw_item_contrato.lstrip('0') if raw_item_contrato else ""
             if raw_item_contrato and not item_contrato_limpo: item_contrato_limpo = "0"
@@ -357,11 +365,11 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             os_info = os_dict.get(case_id, {})
             
             os_numero = str(os_info.get('FOZ_Numero_OS__c') or '')
-            os_franquia = str(os_info.get('FOZ_Nome_Franquia__c') or '').strip()
             
-            # NOVO RÓTULO PARA QUANDO NÃO HÁ FRANQUIA
-            if not os_franquia: 
-                os_franquia = "⏳ AGUARDANDO ROTEIRIZAÇÃO"
+            # O ANTIGO CAMPO DE FRANQUIA AGORA É A BASE/ROTA DA OS
+            os_base_roteirizacao = str(os_info.get('FOZ_Nome_Franquia__c') or '').strip()
+            if not os_base_roteirizacao: 
+                os_base_roteirizacao = "⏳ AGUARDANDO ROTEIRIZAÇÃO"
                 
             os_tipo_servico = str(os_info.get('FOZ_Tipo_de_Servico__c') or 'Sem Tipo')
             os_agendamento = str(os_info.get('FOZ_Agendado_para_data_periodo__c') or '')
@@ -414,7 +422,8 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'Asset - Endereço': asset_end,
                 'Asset - Instalação': asset_install,
                 'OS - Número': os_numero,
-                'OS - Franquia': os_franquia,
+                'OS - Franquia': os_franquia_principal,
+                'OS - Base (Rota)': os_base_roteirizacao,
                 'OS - Tipo Serviço': os_tipo_servico,
                 'OS - Agendamento': os_agendamento,
                 'OS - Técnico': os_tecnico,
@@ -814,7 +823,7 @@ elif st.session_state.fila_selecionada is None and st.session_state.franquia_sel
             
             if agendamentos_disp:
                 agendamento_global_sel = st.multiselect(
-                    "📅 Escolha o Data/Período (Filtra todas as franquias abaixo):", 
+                    "📅 Escolha a Data/Período (Filtra todas as franquias abaixo):", 
                     agendamentos_disp, 
                     placeholder="Mostrando todos os agendamentos..."
                 )
@@ -887,7 +896,7 @@ elif st.session_state.fila_selecionada is not None:
     colunas_ordem_ideal = [
         'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 
         'Motivo', 'Detalhe', 'Substatus', 'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 
-        'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)'
+        'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
     ]
     df_render = df_view[colunas_ordem_ideal].copy()
     df_render.insert(0, 'Selecionar', False)
@@ -899,6 +908,7 @@ elif st.session_state.fila_selecionada is not None:
         df_render.style.apply(colorir_linha, axis=1),
         column_config={
             "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
+            "ID do Caso": None, "ID do Proprietário": None, 
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
             "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
@@ -908,7 +918,6 @@ elif st.session_state.fila_selecionada is not None:
         disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_oa"
     )
 
-    # Identifica IDs reais para botões
     casos_selecionados = df_view.iloc[edited_df[edited_df['Selecionar'] == True].index]
     
     if not casos_selecionados.empty:
@@ -946,29 +955,34 @@ elif st.session_state.franquia_selecionada is not None:
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
     
-    st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Franquia OS: {fra_atual}</h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2 style='color: #0c1c2b; margin-top: 15px; margin-bottom: 20px;'>Franquia Oficial: {fra_atual}</h2>", unsafe_allow_html=True)
     
     df_view_os = df_filtrado[(df_filtrado['Tipo Aba'] == 'OS') & (df_filtrado['OS - Franquia'] == fra_atual)].copy()
     
-    col_f1, col_f2, col_f3 = st.columns([2, 2, 4])
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
     with col_f1:
+        bases_disp = sorted([str(x) for x in df_view_os['OS - Base (Rota)'].unique() if str(x).strip() != ''])
+        base_sel = st.selectbox("🏢 Filtrar Base/Rota:", ["Todas"] + bases_disp)
+        if base_sel != "Todas": df_view_os = df_view_os[df_view_os['OS - Base (Rota)'] == base_sel]
+    with col_f2:
         tipos_disp = sorted(df_view_os['OS - Tipo Serviço'].dropna().unique().tolist())
         tipo_sel = st.selectbox("🛠️ Filtrar Tipo de Serviço:", ["Todos"] + tipos_disp)
         if tipo_sel != "Todos": df_view_os = df_view_os[df_view_os['OS - Tipo Serviço'] == tipo_sel]
-    with col_f2:
+    with col_f3:
         status_disp = sorted(df_view_os['Status'].dropna().unique().tolist())
         status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
         if status_sel != "Todos": df_view_os = df_view_os[df_view_os['Status'] == status_sel]
-    with col_f3:
+    with col_f4:
         agendamentos_disp = sorted([str(x) for x in df_view_os['OS - Agendamento'].unique() if str(x).strip() != ''])
         agendamento_sel = st.multiselect("📅 Filtrar Agendamento:", agendamentos_disp, placeholder="Todos os agendamentos...")
         if agendamento_sel:
             df_view_os = df_view_os[df_view_os['OS - Agendamento'].isin(agendamento_sel)]
         
     st.markdown("### 📊 Quebra Operacional da Franquia")
-    df_breakdown = df_view_os.groupby(['OS - Tipo Serviço', 'Status']).size().reset_index(name='Quantidade')
+    # Agrupamento 3D: Base > Tipo de Serviço > Status
+    df_breakdown = df_view_os.groupby(['OS - Base (Rota)', 'OS - Tipo Serviço', 'Status']).size().reset_index(name='Quantidade')
     if not df_breakdown.empty:
-        df_pivot = df_breakdown.pivot(index='OS - Tipo Serviço', columns='Status', values='Quantidade').fillna(0).astype(int)
+        df_pivot = df_breakdown.pivot(index=['OS - Base (Rota)', 'OS - Tipo Serviço'], columns='Status', values='Quantidade').fillna(0).astype(int)
         df_pivot['Total Geral'] = df_pivot.sum(axis=1)
         st.dataframe(df_pivot, use_container_width=True)
     else:
@@ -979,7 +993,7 @@ elif st.session_state.franquia_selecionada is not None:
     
     colunas_ordem_ideal = [
         'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Conta - Posição Fin.', 'Conta - Classificação',
-        'OS - Número', 'OS - Franquia', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Técnico',
+        'OS - Número', 'OS - Franquia', 'OS - Base (Rota)', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Técnico',
         'Item de Contrato', 'Asset - Status', 'Asset - Endereço', 'Asset - Instalação',
         'Abertura', 'Fechamento', 'Status', 'SLA (Prazo)', 'Substatus', 
         'Origem', 'Tipo Solicitação', 'Motivo', 'Detalhe',  
