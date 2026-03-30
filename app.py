@@ -5,6 +5,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
 import time
+import re
 
 # Tenta importar o autorefresh para a Atualização Automática
 try:
@@ -123,7 +124,6 @@ def load_basecorp():
 @st.cache_data(ttl=3600)
 def load_capacidade():
     try:
-        # Tenta ler o CSV. O engine='python' com sep=None ajuda a descobrir automaticamente se é vírgula ou ponto-e-vírgula
         df = pd.read_csv('Relatório de Controle da Capacidade.csv', sep=None, engine='python', encoding='utf-8-sig')
         df.columns = df.columns.str.strip()
         
@@ -158,7 +158,7 @@ def get_api_user_id(username, _pwd, _token):
         pass
     return None
 
-@st.cache_data(ttl=3600, show_spinner="A atualizar lista de proprietários...") 
+@st.cache_data(ttl=3600, show_spinner="Atualizando lista de proprietários...") 
 def get_owner_options(username, _pwd, _token):
     sf_conn = init_connection(username, _pwd, _token)
     users = sf_conn.query_all("SELECT Id, Name FROM User WHERE IsActive = TRUE")
@@ -212,7 +212,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
     """
     
     sf_base_url = "https://ibbl.lightning.force.com/lightning/r/Case/"
-    my_bar = st.progress(0, text="A iniciar sincronização de Casos...")
+    my_bar = st.progress(0, text="Iniciando sincronização de Casos...")
     
     try:
         result = sf_conn.query(query)
@@ -222,16 +222,16 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         if total_records > 0:
             current_len = len(records)
             percent = int((current_len / total_records) * 30)
-            my_bar.progress(percent, text=f"A transferir casos... ({current_len} de {total_records})")
+            my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
 
             while not result.get('done', True):
                 result = sf_conn.query_more(result['nextRecordsUrl'], True)
                 records.extend(result.get('records', []))
                 current_len = len(records)
                 percent = int((current_len / total_records) * 30)
-                my_bar.progress(percent, text=f"A transferir casos... ({current_len} de {total_records})")
+                my_bar.progress(percent, text=f"Baixando casos... ({current_len} de {total_records})")
 
-        my_bar.progress(35, text="A procurar Itens de Ordem de Serviço na Base...")
+        my_bar.progress(35, text="Buscando Itens de Ordem de Serviço na Base...")
 
         os_dict = {}
         case_ids = [r['Id'] for r in records if str(r.get('Type') or '').upper() == 'OS']
@@ -258,7 +258,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 except Exception as e:
                     pass
 
-        my_bar.progress(50, text="A processar dados visuais e regras de negócio...")
+        my_bar.progress(50, text="Processando dados visuais e regras de negócio...")
 
         linhas = []
         hoje_utc = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -267,7 +267,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
         for i, record in enumerate(records):
             if total_processar > 0 and i % 500 == 0:
                 progresso_atual = 50 + int((i / total_processar) * 50)
-                my_bar.progress(progresso_atual, text=f"A estruturar inteligência... {progresso_atual}%")
+                my_bar.progress(progresso_atual, text=f"Estruturando inteligência... {progresso_atual}%")
 
             tipo_caso = str(record.get('Type') or '').upper()
             tipo_aba = 'OS' if 'OS' in tipo_caso else 'OA'
@@ -277,7 +277,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 continue 
 
             dono_upper = str(record['Owner']['Name'] or '').upper() if record.get('Owner') else 'SISTEMA/SEM DONO'
-            
             filas_conhecidas = ["ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"]
             
             if "SAFETY" in dono_upper:
@@ -381,6 +380,11 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 
             os_tipo_servico = str(os_info.get('FOZ_Tipo_de_Servico__c') or 'Sem Tipo')
             os_agendamento = str(os_info.get('FOZ_Agendado_para_data_periodo__c') or '')
+            
+            # --- EXTRAÇÃO DA DATA EXATA DO AGENDAMENTO ---
+            match_data = re.search(r'\d{2}/\d{2}/\d{4}', os_agendamento)
+            os_data_agendamento = match_data.group(0) if match_data else ""
+            
             os_tecnico = str(os_info.get('FOZ_Id_Tecnico__c') or '')
                 
             desc_oficial = str(record.get('Description') or '')
@@ -433,6 +437,7 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 'OS - Base (Rota)': os_base_roteirizacao,
                 'OS - Tipo Serviço': os_tipo_servico,
                 'OS - Agendamento': os_agendamento,
+                'OS - Data Agendamento': os_data_agendamento, # Nova Coluna
                 'OS - Técnico': os_tecnico,
                 'Descrição': descricao_final,
                 'Fila Principal': fila_principal,
@@ -678,32 +683,71 @@ def modal_followup(casos_selecionados_df, lista_prop):
                 st.error(f"Erro: {e}")
 
 # --- RENDERIZAÇÃO DE CARDS DINÂMICOS ---
-def desenhar_card(titulo, df_subset, tipo):
-    vol = len(df_subset)
-    trat = len(df_subset[df_subset['Macro Status'] == '🟡 Em Tratativa'])
-    fech = len(df_subset[df_subset['Macro Status'] == '🟢 Fechado'])
-    atr = len(df_subset[(df_subset['SLA Macro'] == '🔴 Atrasado') & (df_subset['Macro Status'] == '🟡 Em Tratativa')])
-    
-    cor_atraso = "#d9534f" if atr > 0 else "#555555"
-    borda_destaque = "border-top: 4px solid #d9534f;" if "SAFETY" in titulo else "border-top: 4px solid #0056b3;"
-    
-    html_card = f"""
-    <div style="background-color: white; border: 1px solid #dce1e6; border-radius: 8px 8px 0px 0px; padding: 15px; height: 145px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: space-between; {borda_destaque}">
-        <h4 style="margin: 0; padding: 0; color: #0c1c2b; font-size: 14px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{titulo}">{titulo}</h4>
-        <div style="font-size: 13px; color: #495057; line-height: 1.6; margin-top: 10px;">
-            <div style="display: flex; justify-content: space-between;"><span>Volume:</span> <b>{vol}</b></div>
-            <div style="display: flex; justify-content: space-between;"><span>Abertos:</span> <b>{trat}</b></div>
-            <div style="display: flex; justify-content: space-between; border-top: 1px dashed #eee; margin-top: 4px; padding-top: 4px;"><span>Atrasados:</span> <b style="color: {cor_atraso};">{atr}</b></div>
+def desenhar_card(titulo, df_subset, tipo, df_cap=None):
+    if tipo == "OA":
+        vol = len(df_subset)
+        trat = len(df_subset[df_subset['Macro Status'] == '🟡 Em Tratativa'])
+        fech = len(df_subset[df_subset['Macro Status'] == '🟢 Fechado'])
+        atr = len(df_subset[(df_subset['SLA Macro'] == '🔴 Atrasado') & (df_subset['Macro Status'] == '🟡 Em Tratativa')])
+        
+        cor_atraso = "#d9534f" if atr > 0 else "#555555"
+        borda_destaque = "border-top: 4px solid #d9534f;" if "SAFETY" in titulo else "border-top: 4px solid #0056b3;"
+        
+        html_card = f"""
+        <div style="background-color: white; border: 1px solid #dce1e6; border-radius: 8px 8px 0px 0px; padding: 15px; height: 145px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: space-between; {borda_destaque}">
+            <h4 style="margin: 0; padding: 0; color: #0c1c2b; font-size: 14px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{titulo}">{titulo}</h4>
+            <div style="font-size: 13px; color: #495057; line-height: 1.6; margin-top: 10px;">
+                <div style="display: flex; justify-content: space-between;"><span>Volume:</span> <b>{vol}</b></div>
+                <div style="display: flex; justify-content: space-between;"><span>Abertos:</span> <b>{trat}</b></div>
+                <div style="display: flex; justify-content: space-between; border-top: 1px dashed #eee; margin-top: 4px; padding-top: 4px;"><span>Atrasados:</span> <b style="color: {cor_atraso};">{atr}</b></div>
+            </div>
         </div>
-    </div>
-    """
-    st.markdown(html_card, unsafe_allow_html=True)
-    if st.button("Abrir Detalhe", key=f"btn_{tipo}_{titulo}", use_container_width=True):
-        if tipo == "OA":
+        """
+        st.markdown(html_card, unsafe_allow_html=True)
+        if st.button("Abrir Detalhe", key=f"btn_{tipo}_{titulo}", use_container_width=True):
             st.session_state.fila_selecionada = titulo
-        else:
+            st.rerun()
+
+    elif tipo == "OS":
+        hoje_str = datetime.now(fuso_br).strftime("%d/%m/%Y")
+        df_hoje = df_subset[df_subset['OS - Data Agendamento'] == hoje_str]
+        
+        vol = len(df_hoje)
+        status_counts = df_hoje['Status'].value_counts()
+        
+        agendado = status_counts.get('Agendado', 0)
+        aguardando = status_counts.get('Aguardando Produto', 0)
+        execucao = status_counts.get('Em Execução', 0)
+        sucesso = status_counts.get('Executado com Sucesso', 0)
+        insucesso = status_counts.get('Reagendar', 0)
+        
+        cap_total = 0
+        if df_cap is not None and not df_cap.empty:
+            bases_da_franquia = df_subset['OS - Base (Rota)'].unique()
+            df_cap_hoje = df_cap[(df_cap['Data do Registro'] == hoje_str) & (df_cap['Prestador de Serviço'].isin(bases_da_franquia))]
+            cap_total = int(pd.to_numeric(df_cap_hoje['Capacidade'], errors='coerce').sum())
+            
+        html_card = f"""
+        <div style="background-color: white; border: 1px solid #dce1e6; border-radius: 8px 8px 0px 0px; padding: 15px; height: 240px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: space-between; border-top: 4px solid #0056b3;">
+            <h4 style="margin: 0; padding: 0; color: #0c1c2b; font-size: 14px; text-align: center; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{titulo}">{titulo}</h4>
+            <div style="text-align: center; font-size: 11px; color: #666; margin-bottom: 5px; font-weight: bold;">📊 Visão Hoje ({hoje_str})</div>
+            <div style="font-size: 12px; color: #495057; line-height: 1.6;">
+                <div style="display: flex; justify-content: space-between;"><span>Todos:</span> <b>{vol}</b></div>
+                <div style="display: flex; justify-content: space-between;"><span>Agendado:</span> <b>{agendado}</b></div>
+                <div style="display: flex; justify-content: space-between;"><span>Aguardando Produto:</span> <b>{aguardando}</b></div>
+                <div style="display: flex; justify-content: space-between;"><span>Em Execução:</span> <b>{execucao}</b></div>
+                <div style="display: flex; justify-content: space-between;"><span>Executado c/ Sucesso:</span> <b style="color: #28a745;">{sucesso}</b></div>
+                <div style="display: flex; justify-content: space-between;"><span>Insucesso (Reagendar):</span> <b style="color: #d9534f;">{insucesso}</b></div>
+                <div style="display: flex; justify-content: space-between; border-top: 1px dashed #eee; margin-top: 4px; padding-top: 4px;">
+                    <span>Preenchimento Agendas:</span> <b style="color: #0056b3;">{vol} / {cap_total}</b>
+                </div>
+            </div>
+        </div>
+        """
+        st.markdown(html_card, unsafe_allow_html=True)
+        if st.button("Abrir Detalhe", key=f"btn_{tipo}_{titulo}", use_container_width=True):
             st.session_state.franquia_selecionada = titulo
-        st.rerun()
+            st.rerun()
 
 # --- MENU LATERAL (SIDEBAR) ---
 try:
@@ -772,8 +816,6 @@ incluir_fechados = st.sidebar.checkbox("Mostrar Casos Fechados", value=False)
 df_filtrado = get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, SF_USER, SF_PWD, SF_TOKEN)
 lista_proprietarios = get_owner_options(SF_USER, SF_PWD, SF_TOKEN)
 api_user_id = get_api_user_id(SF_USER, SF_PWD, SF_TOKEN)
-
-# ADICIONADO AQUI A LEITURA DO ARQUIVO DE CAPACIDADE
 df_capacidade = load_capacidade()
 
 if filtro_meus_casos and not df_filtrado.empty and api_user_id:
@@ -830,23 +872,20 @@ elif st.session_state.fila_selecionada is None and st.session_state.franquia_sel
             st.info("Nenhuma Ordem de Serviço (OS) encontrada para o período selecionado.")
         else:
             st.markdown("### 🔍 Filtro Rápido de Agendamento")
-            agendamentos_disp = sorted([str(x) for x in df_os['OS - Agendamento'].unique() if str(x).strip() != ''])
             
-            if agendamentos_disp:
-                agendamento_global_sel = st.multiselect(
-                    "📅 Escolha a Data/Período (Filtra todas as franquias abaixo):", 
-                    agendamentos_disp, 
-                    placeholder="Mostrando todos os agendamentos..."
-                )
-                if agendamento_global_sel:
-                    df_os = df_os[df_os['OS - Agendamento'].isin(agendamento_global_sel)]
+            # Novo Filtro por DATA em vez de selectbox
+            data_agendamento_global = st.date_input("📅 Filtrar Agendamento (Data Exata):", value=None)
+            agendamento_global_sel_str = data_agendamento_global.strftime('%d/%m/%Y') if data_agendamento_global else None
+            
+            if agendamento_global_sel_str:
+                df_os = df_os[df_os['OS - Data Agendamento'] == agendamento_global_sel_str]
                     
             franquias = sorted(df_os['OS - Franquia'].unique().tolist())
             cols = st.columns(4)
             for i, fra in enumerate(franquias):
                 df_fra = df_os[df_os['OS - Franquia'] == fra]
                 with cols[i % 4]:
-                    desenhar_card(fra, df_fra, "OS")
+                    desenhar_card(fra, df_fra, "OS", df_capacidade)
                     st.markdown("<br>", unsafe_allow_html=True)
 
 # DETALHE DA FILA OA
@@ -984,10 +1023,10 @@ elif st.session_state.franquia_selecionada is not None:
         status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
         if status_sel != "Todos": df_view_os = df_view_os[df_view_os['Status'] == status_sel]
     with col_f4:
-        agendamentos_disp = sorted([str(x) for x in df_view_os['OS - Agendamento'].unique() if str(x).strip() != ''])
-        agendamento_sel = st.multiselect("📅 Filtrar Agendamento:", agendamentos_disp, placeholder="Todos os agendamentos...")
-        if agendamento_sel:
-            df_view_os = df_view_os[df_view_os['OS - Agendamento'].isin(agendamento_sel)]
+        data_agendamento = st.date_input("📅 Filtrar Agendamento (Data Exata):", value=None)
+        agendamento_sel_str = data_agendamento.strftime('%d/%m/%Y') if data_agendamento else None
+        if agendamento_sel_str:
+            df_view_os = df_view_os[df_view_os['OS - Data Agendamento'] == agendamento_sel_str]
             
     st.markdown("### 📊 Quebra Operacional da Franquia")
     # Agrupamento 3D: Base > Tipo de Serviço > Status
@@ -1006,17 +1045,28 @@ elif st.session_state.franquia_selecionada is not None:
     if not df_capacidade.empty:
         # Filtra o CSV para mostrar apenas a Base (Prestador de Serviço) selecionada
         bases_para_filtrar = [base_sel] if base_sel != "Todas" else [str(x) for x in df_view_os['OS - Base (Rota)'].unique() if str(x).strip() != '']
-        
-        # Realiza o match entre SF e CSV
         df_cap_filtrado = df_capacidade[df_capacidade['Prestador de Serviço'].isin(bases_para_filtrar)].copy()
         
         if not df_cap_filtrado.empty:
-            # Se o utilizador filtrou um agendamento (Data) no Salesforce, tenta filtrar o CSV também
-            if agendamento_sel:
-                # Pega apenas as datas puras para o match flexível (caso o SF tenha formato diferente)
-                datas_sf = [str(d).split()[0] for d in agendamento_sel]
-                mask_data = df_cap_filtrado['Data do Registro'].astype(str).apply(lambda x: any(d in x for d in datas_sf))
-                df_cap_filtrado = df_cap_filtrado[mask_data]
+            # Respeita o filtro Global de Data feito na seção anterior
+            if agendamento_sel_str:
+                df_cap_filtrado = df_cap_filtrado[df_cap_filtrado['Data do Registro'] == agendamento_sel_str]
+                
+            # Filtros Dinâmicos Internos do Painel de Capacidade
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                datas_disp_cap = sorted(df_cap_filtrado['Data do Registro'].unique().tolist())
+                data_cap_sel = st.multiselect("Filtrar Data do Registro:", datas_disp_cap, default=[agendamento_sel_str] if agendamento_sel_str in datas_disp_cap else [])
+            with c2:
+                prest_disp_cap = sorted(df_cap_filtrado['Prestador de Serviço'].unique().tolist())
+                prest_sel_cap = st.multiselect("Filtrar Prestador de Serviço:", prest_disp_cap)
+            with c3:
+                serv_disp_cap = sorted(df_cap_filtrado['Serviços'].unique().tolist())
+                serv_sel_cap = st.multiselect("Filtrar Serviços:", serv_disp_cap)
+                
+            if data_cap_sel: df_cap_filtrado = df_cap_filtrado[df_cap_filtrado['Data do Registro'].isin(data_cap_sel)]
+            if prest_sel_cap: df_cap_filtrado = df_cap_filtrado[df_cap_filtrado['Prestador de Serviço'].isin(prest_sel_cap)]
+            if serv_sel_cap: df_cap_filtrado = df_cap_filtrado[df_cap_filtrado['Serviços'].isin(serv_sel_cap)]
 
             if not df_cap_filtrado.empty:
                 # --- MÉTRICAS CONSOLIDADAS ---
@@ -1065,9 +1115,9 @@ elif st.session_state.franquia_selecionada is not None:
                     hide_index=True
                 )
             else:
-                st.info("ℹ️ Não há informações de capacidade no CSV para as datas específicas selecionadas no filtro.")
+                st.info("ℹ️ Não há informações de capacidade com base nos filtros selecionados.")
         else:
-            st.warning("⚠️ Nenhuma correspondência de Capacidade encontrada no CSV para a Base/Rota selecionada. Verifique se o nome no Salesforce bate com a coluna 'Prestador de Serviço'.")
+            st.warning("⚠️ Nenhuma correspondência de Capacidade encontrada no CSV para a Base/Rota selecionada.")
     else:
         st.warning("⚠️ O arquivo 'Relatório de Controle da Capacidade.csv' não foi encontrado ou está vazio. Coloque o ficheiro na mesma pasta da aplicação.")
 
@@ -1076,7 +1126,7 @@ elif st.session_state.franquia_selecionada is not None:
     
     colunas_ordem_ideal = [
         'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Conta - Posição Fin.', 'Conta - Classificação',
-        'OS - Número', 'OS - Franquia', 'OS - Base (Rota)', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Técnico',
+        'OS - Número', 'OS - Franquia', 'OS - Base (Rota)', 'OS - Tipo Serviço', 'OS - Agendamento', 'OS - Data Agendamento', 'OS - Técnico',
         'Item de Contrato', 'Asset - Status', 'Asset - Endereço', 'Asset - Instalação',
         'Abertura', 'Fechamento', 'Status', 'SLA (Prazo)', 'Substatus', 
         'Origem', 'Tipo Solicitação', 'Motivo', 'Detalhe',  
