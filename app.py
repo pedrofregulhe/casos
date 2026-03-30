@@ -770,7 +770,7 @@ st.session_state.last_df = df_filtrado.copy() if not df_filtrado.empty else pd.D
 
 
 # =========================================================================
-# RENDERIZAÇÃO DA TELA PRINCIPAL E ABAS MESTRAS
+# RENDERIZAÇÃO DA TELA PRINCIPAL (ABAS OU DETALHE)
 # =========================================================================
 if df_filtrado.empty:
     st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
@@ -809,6 +809,18 @@ elif st.session_state.fila_selecionada is None and st.session_state.franquia_sel
         if df_os.empty:
             st.info("Nenhuma Ordem de Serviço (OS) encontrada para o período selecionado.")
         else:
+            st.markdown("### 🔍 Filtro Rápido de Agendamento")
+            agendamentos_disp = sorted([str(x) for x in df_os['OS - Agendamento'].unique() if str(x).strip() != ''])
+            
+            if agendamentos_disp:
+                agendamento_global_sel = st.multiselect(
+                    "📅 Escolha o Data/Período (Filtra todas as franquias abaixo):", 
+                    agendamentos_disp, 
+                    placeholder="Mostrando todos os agendamentos..."
+                )
+                if agendamento_global_sel:
+                    df_os = df_os[df_os['OS - Agendamento'].isin(agendamento_global_sel)]
+                    
             franquias = sorted(df_os['OS - Franquia'].unique().tolist())
             cols = st.columns(4)
             for i, fra in enumerate(franquias):
@@ -875,7 +887,7 @@ elif st.session_state.fila_selecionada is not None:
     colunas_ordem_ideal = [
         'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Abertura', 'Fechamento', 'Origem', 'Tipo Solicitação', 
         'Motivo', 'Detalhe', 'Substatus', 'SLA (Prazo)', 'Status', 'BaseCorp Carteira', 'Item de Contrato', 
-        'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
+        'Descrição', 'Fila Principal', 'Subfila', 'Idade (Dias)'
     ]
     df_render = df_view[colunas_ordem_ideal].copy()
     df_render.insert(0, 'Selecionar', False)
@@ -887,7 +899,6 @@ elif st.session_state.fila_selecionada is not None:
         df_render.style.apply(colorir_linha, axis=1),
         column_config={
             "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
-            "ID do Caso": None, "ID do Proprietário": None, 
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
             "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
@@ -897,7 +908,9 @@ elif st.session_state.fila_selecionada is not None:
         disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_oa"
     )
 
-    casos_selecionados = edited_df[edited_df['Selecionar'] == True]
+    # Identifica IDs reais para botões
+    casos_selecionados = df_view.iloc[edited_df[edited_df['Selecionar'] == True].index]
+    
     if not casos_selecionados.empty:
         st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
         c_btn1, c_btn2, c_btn3 = st.columns(3)
@@ -912,7 +925,7 @@ elif st.session_state.fila_selecionada is not None:
     def to_excel_oa(df_export):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
+            df_temp = df_export.drop(columns=['Selecionar']).copy() 
             df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
             if df_temp['Fechamento'].notna().any(): df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
             df_temp.to_excel(writer, index=False, sheet_name='Extrato_OA')
@@ -946,6 +959,11 @@ elif st.session_state.franquia_selecionada is not None:
         status_disp = sorted(df_view_os['Status'].dropna().unique().tolist())
         status_sel = st.selectbox("🚥 Filtrar Status:", ["Todos"] + status_disp)
         if status_sel != "Todos": df_view_os = df_view_os[df_view_os['Status'] == status_sel]
+    with col_f3:
+        agendamentos_disp = sorted([str(x) for x in df_view_os['OS - Agendamento'].unique() if str(x).strip() != ''])
+        agendamento_sel = st.multiselect("📅 Filtrar Agendamento:", agendamentos_disp, placeholder="Todos os agendamentos...")
+        if agendamento_sel:
+            df_view_os = df_view_os[df_view_os['OS - Agendamento'].isin(agendamento_sel)]
         
     st.markdown("### 📊 Quebra Operacional da Franquia")
     df_breakdown = df_view_os.groupby(['OS - Tipo Serviço', 'Status']).size().reset_index(name='Quantidade')
@@ -965,7 +983,7 @@ elif st.session_state.franquia_selecionada is not None:
         'Item de Contrato', 'Asset - Status', 'Asset - Endereço', 'Asset - Instalação',
         'Abertura', 'Fechamento', 'Status', 'SLA (Prazo)', 'Substatus', 
         'Origem', 'Tipo Solicitação', 'Motivo', 'Detalhe',  
-        'BaseCorp Carteira', 'Descrição', 'Fila Principal', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
+        'BaseCorp Carteira', 'Descrição', 'Idade (Dias)'
     ]
     df_render = df_view_os[colunas_ordem_ideal].copy()
     
@@ -974,7 +992,6 @@ elif st.session_state.franquia_selecionada is not None:
     st.dataframe(
         df_render.style.apply(colorir_linha, axis=1),
         column_config={
-            "ID do Caso": None, "ID do Proprietário": None, 
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
             "Abertura": st.column_config.DatetimeColumn("Abertura", format="DD/MM/YYYY HH:mm"),
@@ -988,7 +1005,7 @@ elif st.session_state.franquia_selecionada is not None:
     def to_excel_os(df_export):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_temp = df_export.drop(columns=['ID do Proprietário', 'ID do Caso']).copy() 
+            df_temp = df_export.copy() 
             df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
             if df_temp['Fechamento'].notna().any(): df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
             df_temp.to_excel(writer, index=False, sheet_name='Extrato_OS')
