@@ -253,6 +253,14 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 progresso_atual = 50 + int((i / total_processar) * 50)
                 my_bar.progress(progresso_atual, text=f"Estruturando inteligência... {progresso_atual}%")
 
+            tipo_caso = str(record.get('Type') or '').upper()
+            tipo_aba = 'OS' if 'OS' in tipo_caso else 'OA'
+            status_real_sf = str(record.get('Status') or '').strip().lower()
+            
+            # --- FILTRO DE CANCELAMENTO EXCLUSIVO PARA OS ---
+            if tipo_aba == 'OS' and status_real_sf in ['cancelado', 'cancelada', 'canceled', 'cancelled']:
+                continue # Pula esse caso e não coloca no painel
+
             dono_upper = str(record['Owner']['Name'] or '').upper() if record.get('Owner') else 'SISTEMA/SEM DONO'
             
             filas_conhecidas = ["ERRO SISTÊMICO", "CAPACIDADE", "FRANQUIAS", "AUDITORIA", "HELP TEC", "JURÍDICO", "INFORMAÇÃO", "RAF", "FINANCEIRO", "BACKOFFICE"]
@@ -281,8 +289,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             sla_macro = "✅ No Prazo"
             sla_visual = "⚪ Sem SLA"
             sla_atrasado_bool = False
-            
-            status_real_sf = str(record.get('Status') or '').strip().lower()
             
             if fila_principal in ["CASOS SEM FILA - GENÉRICO", "CORPORATIVO"] and status_real_sf in ["aberto", "em aberto"]:
                 target_dt_custom = data_abertura + timedelta(hours=24)
@@ -352,8 +358,10 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
             
             os_numero = str(os_info.get('FOZ_Numero_OS__c') or '')
             os_franquia = str(os_info.get('FOZ_Nome_Franquia__c') or '').strip()
+            
+            # NOVO RÓTULO PARA QUANDO NÃO HÁ FRANQUIA
             if not os_franquia: 
-                os_franquia = "FRANQUIA NÃO INFORMADA"
+                os_franquia = "⏳ AGUARDANDO ROTEIRIZAÇÃO"
                 
             os_tipo_servico = str(os_info.get('FOZ_Tipo_de_Servico__c') or 'Sem Tipo')
             os_agendamento = str(os_info.get('FOZ_Agendado_para_data_periodo__c') or '')
@@ -380,9 +388,6 @@ def get_data(periodo_selecionado, dt_inicio, dt_fim, incluir_fechados, username,
                 descricao_final = f"💬 HISTÓRICO DE COMENTÁRIOS:\n{historico_comentarios}".strip()
             else:
                 descricao_final = desc_oficial if desc_oficial else "-"
-                
-            tipo_caso = str(record.get('Type') or '').upper()
-            tipo_aba = 'OS' if 'OS' in tipo_caso else 'OA'
                 
             linhas.append({
                 'ID do Caso': record.get('Id'),
@@ -765,7 +770,7 @@ st.session_state.last_df = df_filtrado.copy() if not df_filtrado.empty else pd.D
 
 
 # =========================================================================
-# RENDERIZAÇÃO DA TELA PRINCIPAL (ABAS OU DETALHE)
+# RENDERIZAÇÃO DA TELA PRINCIPAL E ABAS MESTRAS
 # =========================================================================
 if df_filtrado.empty:
     st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
@@ -774,7 +779,7 @@ if df_filtrado.empty:
 elif st.session_state.fila_selecionada is None and st.session_state.franquia_selecionada is None:
     st.markdown("<h1>Visão Operacional de Casos</h1>", unsafe_allow_html=True)
     
-    # CRIAÇÃO DAS DUAS GRANDES ABAS (TABS)
+    # CRIAÇÃO DAS DUAS GRANDES ABAS NO TOPO DA TELA
     tab_oa, tab_os = st.tabs(["📁 Visão OA (Atendimentos)", "🔧 Visão OS (Ordens de Serviço)"])
     
     # CONTEÚDO DA ABA OA
@@ -919,7 +924,7 @@ elif st.session_state.fila_selecionada is not None:
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
 
-# DETALHE DA FRANQUIA OS
+# DETALHE DA FRANQUIA OS (SOMENTE LEITURA - SEM BOTÕES DE AÇÃO)
 elif st.session_state.franquia_selecionada is not None:
     fra_atual = st.session_state.franquia_selecionada
     st.markdown('<div class="btn-voltar-container">', unsafe_allow_html=True)
@@ -947,13 +952,12 @@ elif st.session_state.franquia_selecionada is not None:
     if not df_breakdown.empty:
         df_pivot = df_breakdown.pivot(index='OS - Tipo Serviço', columns='Status', values='Quantidade').fillna(0).astype(int)
         df_pivot['Total Geral'] = df_pivot.sum(axis=1)
-        # Removido o background_gradient que causava o erro de matplotlib
         st.dataframe(df_pivot, use_container_width=True)
     else:
         st.info("Nenhuma OS para o filtro selecionado.")
     
     st.markdown("---")
-    st.markdown("### 📋 Tabela Detalhada de OS")
+    st.markdown("### 📋 Tabela Detalhada de OS (Somente Leitura)")
     
     colunas_ordem_ideal = [
         'Número', 'Link Salesforce', 'Conta', 'Conta - CNPJ', 'Conta - Posição Fin.', 'Conta - Classificação',
@@ -964,15 +968,12 @@ elif st.session_state.franquia_selecionada is not None:
         'BaseCorp Carteira', 'Descrição', 'Fila Principal', 'Idade (Dias)', 'ID do Caso', 'ID do Proprietário'
     ]
     df_render = df_view_os[colunas_ordem_ideal].copy()
-    df_render.insert(0, 'Selecionar', False)
     
     def colorir_linha(row): return ['background-color: #ffebee' if 'Atrasado' in row['SLA (Prazo)'] else 'background-color: #ffffff' for _ in row]
-    colunas_bloqueadas = df_render.columns.drop(['Selecionar']).tolist()
 
-    edited_df = st.data_editor(
+    st.dataframe(
         df_render.style.apply(colorir_linha, axis=1),
         column_config={
-            "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
             "ID do Caso": None, "ID do Proprietário": None, 
             "Link Salesforce": st.column_config.LinkColumn("Acessar", display_text="Abrir"),
             "Idade (Dias)": st.column_config.NumberColumn("Idade (Dias)", format="%d"),
@@ -980,25 +981,14 @@ elif st.session_state.franquia_selecionada is not None:
             "Fechamento": st.column_config.DatetimeColumn("Fechamento", format="DD/MM/YYYY HH:mm"),
             "Descrição": st.column_config.TextColumn("Descrição", width="large")
         },
-        disabled=colunas_bloqueadas, use_container_width=True, hide_index=True, key="editor_os"
+        use_container_width=True, hide_index=True
     )
-
-    casos_selecionados = edited_df[edited_df['Selecionar'] == True]
-    if not casos_selecionados.empty:
-        st.markdown(f"**⚡ Ações Disponíveis ({len(casos_selecionados)} selecionados):**")
-        c_btn1, c_btn2, c_btn3 = st.columns(3)
-        with c_btn1:
-            if st.button("🔄 Transferir OS", use_container_width=True): modal_transferir_comentar(casos_selecionados, lista_proprietarios)
-        with c_btn2:
-            if st.button("📝 Editar OS", use_container_width=True): modal_editar_casos(casos_selecionados, df_view_os)
-        with c_btn3:
-            if st.button("🔔 Criar Follow-up", use_container_width=True): modal_followup(casos_selecionados, lista_proprietarios)
 
     st.markdown("<br>", unsafe_allow_html=True)
     def to_excel_os(df_export):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_temp = df_export.drop(columns=['Selecionar', 'ID do Proprietário', 'ID do Caso']).copy() 
+            df_temp = df_export.drop(columns=['ID do Proprietário', 'ID do Caso']).copy() 
             df_temp['Abertura'] = df_temp['Abertura'].dt.tz_localize(None)
             if df_temp['Fechamento'].notna().any(): df_temp['Fechamento'] = df_temp['Fechamento'].dt.tz_localize(None)
             df_temp.to_excel(writer, index=False, sheet_name='Extrato_OS')
