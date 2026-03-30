@@ -947,7 +947,8 @@ elif st.session_state.franquia_selecionada is not None:
     if not df_breakdown.empty:
         df_pivot = df_breakdown.pivot(index='OS - Tipo Serviço', columns='Status', values='Quantidade').fillna(0).astype(int)
         df_pivot['Total Geral'] = df_pivot.sum(axis=1)
-        st.dataframe(df_pivot.style.background_gradient(cmap='Blues'), use_container_width=True)
+        # Removido o background_gradient que causava o erro de matplotlib
+        st.dataframe(df_pivot, use_container_width=True)
     else:
         st.info("Nenhuma OS para o filtro selecionado.")
     
